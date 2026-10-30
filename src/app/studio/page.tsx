@@ -108,7 +108,10 @@ export default function StudioPage() {
   /** Start parallel WAV capture for transcription. Failure is non-fatal (mock still works). */
   async function startAudioCapture(stream: MediaStream): Promise<void> {
     try {
-      const Ctx = window.AudioContext;
+      const Ctx =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return;
       const ctx = new Ctx();
       await ctx.resume().catch(() => {});
       const url = URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'application/javascript' }));
