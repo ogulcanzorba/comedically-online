@@ -8,6 +8,13 @@ export interface TranscriptWord {
   endMs: number;
 }
 
+/** One speech turn (Voice ENDPOINTING gives turn-level, not word-level, times). */
+export interface TranscriptTurn {
+  startMs: number;
+  endMs: number;
+  transcript: string;
+}
+
 /** Normalized 0..1 box relative to the video frame. */
 export interface NormBox {
   x: number;

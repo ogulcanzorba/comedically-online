@@ -1,0 +1,102 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { moderateChunk, bleepWindowsForTarget } from '../src/moderation/index';
+import { parseSamOutput } from '../src/moderation/detect-visual';
+import { SpendTracker } from '../src/moderation/cost';
+import { MOCK_BANNED_WORD } from '../src/moderation/mock';
+
+const RULES = ["bleep my ex's name", 'blur phone screens', 'my jokes about my own family are fine'];
+
+async function runMock(seq: number, tracker = new SpendTracker()) {
+  return moderateChunk({
+    seq,
+    video: Buffer.from('fake-video'),
+    wav: null,
+    rules: RULES,
+    recentTranscript: '',
+    tracker,
+  });
+}
+
+describe('moderation mock mode', () => {
+  it('bleeps the invented banned word inside the chunk window', async () => {
+    const res = await runMock(2); // seq%4==2 carries the banned word
+    assert.ok(res.transcriptText.includes(MOCK_BANNED_WORD));
+    const bleeps = res.decisions.filter((d) => d.action === 'bleep');
+    assert.equal(bleeps.length, 1);
+    assert.ok(bleeps[0].startMs !== undefined && bleeps[0].endMs !== undefined);
+    assert.ok(bleeps[0].startMs >= 0 && bleeps[0].endMs <= 2000);
+    assert.ok(bleeps[0].startMs < bleeps[0].endMs);
+    assert.equal(res.entry.action, 'bleep');
+    assert.equal(res.costUsd, 0);
+  });
+
+  it('allows the family joke per house rules', async () => {
+    const res = await runMock(0); // seq%4==0 is the family bit
+    assert.ok(/mom|family/i.test(res.transcriptText));
+    assert.deepEqual(res.decisions, []);
+    assert.equal(res.entry.action, 'allow');
+    assert.match(res.entry.reason, /family/i);
+  });
+
+  it('blurs the fixed phone-screen box on scripted chunks', async () => {
+    const res = await runMock(3); // seq%5==3 carries the visual flag
+    const blurs = res.decisions.filter((d) => d.action === 'blur');
+    assert.equal(blurs.length, 1);
+    assert.ok(blurs[0].box);
+    assert.ok(blurs[0].box.x >= 0 && blurs[0].box.x + blurs[0].box.w <= 1);
+    assert.ok(blurs[0].box.y >= 0 && blurs[0].box.y + blurs[0].box.h <= 1);
+  });
+
+  it('falls back to mock when the spend cap is reached, without calling live APIs', async () => {
+    const prevMode = process.env.MODERATION_MODE;
+    const prevCap = process.env.MAX_SPEND_USD;
+    process.env.MODERATION_MODE = 'live';
+    process.env.MAX_SPEND_USD = '0.01';
+    delete process.env.MODEL_API_KEY;
+    try {
+      const tracker = new SpendTracker();
+      tracker.add(99); // over cap before the chunk runs
+      const res = await runMock(1, tracker);
+      assert.equal(res.mode, 'mock');
+      assert.match(res.entry.reason, /spend cap reached/);
+    } finally {
+      if (prevMode === undefined) delete process.env.MODERATION_MODE;
+      else process.env.MODERATION_MODE = prevMode;
+      if (prevCap === undefined) delete process.env.MAX_SPEND_USD;
+      else process.env.MAX_SPEND_USD = prevCap;
+    }
+  });
+});
+
+describe('bleepWindowsForTarget', () => {
+  it('maps a word onto its proportional slice of the turn', () => {
+    const windows = bleepWindowsForTarget(
+      [{ startMs: 0, endMs: 2000, transcript: 'aaa blorpt zzz' }],
+      'blorpt',
+    );
+    assert.equal(windows.length, 1);
+    assert.ok(windows[0].startMs > 0 && windows[0].endMs < 2000);
+    assert.ok(windows[0].startMs < windows[0].endMs);
+  });
+
+  it('bleeps the whole chunk when the target is missing', () => {
+    assert.deepEqual(bleepWindowsForTarget([], 'blorpt'), [{ startMs: 0, endMs: 2000 }]);
+  });
+});
+
+describe('parseSamOutput', () => {
+  it('parses frame lines into normalized boxes', () => {
+    const text =
+      '<0f>1<|box;x1=100;y1=50;x2=300;y2=250;w=1000;h=500|><|mask;x=0;y=0;data=1,1,~e|>,' +
+      '2<|box;x1=0;y1=0;x2=1000;y2=500;w=1000;h=500|><|mask;x=0;y=0;data=1,1,~e|>';
+    const records = parseSamOutput(text);
+    assert.equal(records.length, 2);
+    assert.deepEqual(records[0], { frame: 0, id: 1, box: { x: 0.1, y: 0.1, w: 0.2, h: 0.4 } });
+    assert.deepEqual(records[1].box, { x: 0, y: 0, w: 1, h: 1 });
+  });
+
+  it('returns no records for an empty lane (zero matches)', () => {
+    assert.deepEqual(parseSamOutput(''), []);
+  });
+});
