@@ -6,11 +6,64 @@ import type { ModerationLogEntry } from '@/moderation/types';
 
 const DEFAULT_RULES = `bleep my ex's name\nblur phone screens\nmy jokes about my own family are fine`;
 
+/** AudioWorklet processor: forwards mic samples to the main thread. */
+const WORKLET_CODE = `
+class Capture extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch0 = inputs[0] && inputs[0][0];
+    if (ch0) this.port.postMessage(ch0.slice(0));
+    return true;
+  }
+}
+registerProcessor('comedically-capture', Capture);
+`;
+
+/** Encode mono float samples as 16-bit PCM WAV. */
+function encodeWav(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const writeAscii = (offset: number, s: string): void => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  writeAscii(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeAscii(8, 'WAVE');
+  writeAscii(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return buf;
+}
+
+/** Linear resample to 16kHz mono (what Voice Transcribe wants). */
+function resample16k(input: Float32Array, fromRate: number): Float32Array {
+  if (fromRate === 16000) return input;
+  const ratio = fromRate / 16000;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    out[i] = input[Math.floor(i * ratio)];
+  }
+  return out;
+}
+
 export default function StudioPage() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const seqRef = useRef(0);
+  const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
   const [status, setStatus] = useState<'idle' | 'preview' | 'live'>('idle');
   const [rules, setRules] = useState(DEFAULT_RULES);
   const [log, setLog] = useState<ModerationLogEntry[]>([]);
@@ -52,6 +105,57 @@ export default function StudioPage() {
     }
   }
 
+  /** Start parallel WAV capture for transcription. Failure is non-fatal (mock still works). */
+  async function startAudioCapture(stream: MediaStream): Promise<void> {
+    try {
+      const Ctx = window.AudioContext;
+      const ctx = new Ctx();
+      await ctx.resume().catch(() => {});
+      const url = URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'application/javascript' }));
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      const source = ctx.createMediaStreamSource(stream);
+      const node = new AudioWorkletNode(ctx, 'comedically-capture');
+      const silent = ctx.createGain();
+      silent.gain.value = 0;
+      source.connect(node);
+      node.connect(silent);
+      silent.connect(ctx.destination);
+      const capture = { ctx, chunks: [] as Float32Array[] };
+      node.port.onmessage = (ev: MessageEvent<Float32Array>) => {
+        capture.chunks.push(ev.data);
+      };
+      audioRef.current = capture;
+    } catch {
+      audioRef.current = null;
+    }
+  }
+
+  function stopAudioCapture(): void {
+    if (audioRef.current) {
+      void audioRef.current.ctx.close().catch(() => {});
+      audioRef.current = null;
+    }
+  }
+
+  /** Drain buffered mic audio as one 16kHz WAV for the current 2s window. */
+  function drainWav(): ArrayBuffer | null {
+    const capture = audioRef.current;
+    if (!capture || capture.chunks.length === 0) return null;
+    const total = capture.chunks.reduce((n, c) => n + c.length, 0);
+    const merged = new Float32Array(total);
+    let offset = 0;
+    for (const c of capture.chunks) {
+      merged.set(c, offset);
+      offset += c.length;
+    }
+    capture.chunks = [];
+    const mono16k = resample16k(merged, capture.ctx.sampleRate);
+    // Keep the most recent 2s (32k samples); shorter clips are fine too.
+    const windowed = mono16k.length > 32000 ? mono16k.slice(mono16k.length - 32000) : mono16k;
+    return encodeWav(windowed, 16000);
+  }
+
   async function goLive(): Promise<void> {
     const stream = streamRef.current;
     if (!stream || wsRef.current) return;
@@ -78,22 +182,33 @@ export default function StudioPage() {
         ws.onerror = () => reject(new Error('websocket'));
       });
       sendRules(ws, rules);
+      seqRef.current = 0;
+      await startAudioCapture(stream);
       const mimeType =
         ['video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t)) ??
         '';
       const rec = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       recorderRef.current = rec;
       rec.ondataavailable = (ev: BlobEvent) => {
-        if (ev.data.size > 0 && ws.readyState === WebSocket.OPEN) {
-          void ev.data.arrayBuffer().then((buf) => {
-            if (ws.readyState === WebSocket.OPEN) ws.send(buf);
-          });
-        }
+        if (ev.data.size === 0 || ws.readyState !== WebSocket.OPEN) return;
+        const seq = seqRef.current;
+        seqRef.current += 1;
+        void ev.data.arrayBuffer().then((buf) => {
+          if (ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: 'media', kind: 'webm', seq }));
+          ws.send(buf);
+          const wav = drainWav();
+          if (wav) {
+            ws.send(JSON.stringify({ type: 'media', kind: 'wav', seq }));
+            ws.send(wav);
+          }
+        });
       };
       rec.start(2000);
       setStatus('live');
     } catch {
       wsRef.current = null;
+      stopAudioCapture();
       setError('Could not reach the stream server. Is it running?');
     }
   }
@@ -103,6 +218,7 @@ export default function StudioPage() {
     recorderRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
+    stopAudioCapture();
     setStatus('preview');
   }
 

@@ -11,6 +11,17 @@ export interface RulesMessage {
 }
 
 /**
+ * Publisher -> server: header sent as a JSON text frame immediately before
+ * each binary frame. `seq` is the studio's chunk counter; webm and wav
+ * frames sharing a seq belong to the same 2s window.
+ */
+export interface MediaMetaMessage {
+  type: 'media';
+  kind: 'webm' | 'wav';
+  seq: number;
+}
+
+/**
  * Server -> viewer: metadata sent as a JSON text frame immediately before
  * the chunk's binary frame. Pair them in arrival order.
  */

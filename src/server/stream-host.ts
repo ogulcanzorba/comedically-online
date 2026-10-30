@@ -1,12 +1,30 @@
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
-import { moderateChunk } from '../moderation/index';
+import { moderateChunk, moderationMode } from '../moderation/index';
+import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
 import type { Decision, ModerationLogEntry } from '../moderation/types';
-import type { ChunkMetaMessage, ClientRole, LogBroadcast, RulesMessage } from '../lib/ws-protocol';
+import type {
+  ChunkMetaMessage,
+  ClientRole,
+  LogBroadcast,
+  MediaMetaMessage,
+  RulesMessage,
+} from '../lib/ws-protocol';
 
 export interface StreamHostOptions {
   delayMs?: number;
   tickMs?: number;
+  /** How long to wait for a chunk's wav before moderating without it. */
+  audioWaitMs?: number;
+}
+
+interface PendingMedia {
+  webm: { data: Buffer; receiptTimeMs: number } | null;
+  wav: Buffer | null;
+  serverSeq: number | null;
+  studioSeq: number;
+  timer: NodeJS.Timeout | null;
+  started: boolean;
 }
 
 /**
@@ -23,12 +41,19 @@ export class StreamHost {
   private publisher: WebSocket | null = null;
   private rules: string[] = [];
   private readonly log: ModerationLogEntry[] = [];
+  private readonly transcriptWindow: Array<{ atMs: number; text: string }> = [];
+  private readonly tracker = new SpendTracker();
+  private readonly streamStartMs = Date.now();
   private initSegment: Buffer | null = null;
   private nextSeq = 0;
+  private pendingMeta: MediaMetaMessage | null = null;
+  private readonly pendingMedia = new Map<number, PendingMedia>();
+  private readonly audioWaitMs: number;
   private readonly timer: NodeJS.Timeout;
 
   constructor(opts: StreamHostOptions = {}) {
     this.buffer = new DelayBuffer<Buffer>(opts.delayMs);
+    this.audioWaitMs = opts.audioWaitMs ?? 750;
     this.timer = setInterval(() => {
       this.flush();
     }, opts.tickMs ?? 250);
@@ -37,6 +62,10 @@ export class StreamHost {
 
   get delayMs(): number {
     return this.buffer.delay;
+  }
+
+  get spendUsd(): number {
+    return this.tracker.totalUsd;
   }
 
   handleConnection(ws: WebSocket, role: ClientRole): void {
@@ -58,6 +87,10 @@ export class StreamHost {
 
   close(): void {
     clearInterval(this.timer);
+    for (const pending of this.pendingMedia.values()) {
+      if (pending.timer) clearTimeout(pending.timer);
+    }
+    this.pendingMedia.clear();
     this.viewers.clear();
     this.startedViewers.clear();
     this.publisher = null;
@@ -75,7 +108,7 @@ export class StreamHost {
     this.resetStream();
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
-        this.onChunk(Buffer.from(data as Buffer));
+        this.onBinary(Buffer.from(data as Buffer));
         return;
       }
       this.onPublisherText(data.toString());
@@ -89,39 +122,96 @@ export class StreamHost {
     this.buffer.clear();
     this.decisions.clear();
     this.pendingModeration.clear();
+    this.pendingMedia.clear();
+    this.pendingMeta = null;
     this.initSegment = null;
     this.nextSeq = 0;
     this.startedViewers.clear();
   }
 
   private onPublisherText(text: string): void {
-    let msg: RulesMessage | null = null;
+    let msg: RulesMessage | MediaMetaMessage | null = null;
     try {
-      msg = JSON.parse(text) as RulesMessage;
+      msg = JSON.parse(text) as RulesMessage | MediaMetaMessage;
     } catch {
       return;
     }
-    if (msg && msg.type === 'rules' && Array.isArray(msg.rules)) {
-      this.rules = msg.rules.filter((r): r is string => typeof r === 'string').slice(0, 20);
+    if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'rules' && Array.isArray((msg as RulesMessage).rules)) {
+      const rules = (msg as RulesMessage).rules;
+      this.rules = rules.filter((r): r is string => typeof r === 'string').slice(0, 20);
       this.pushLog({ seq: -1, at: new Date().toISOString(), action: 'allow', reason: `rules updated (${this.rules.length})` });
+      return;
+    }
+    if (msg.type === 'media') {
+      const meta = msg as MediaMetaMessage;
+      if ((meta.kind === 'webm' || meta.kind === 'wav') && Number.isInteger(meta.seq)) {
+        this.pendingMeta = meta;
+      }
     }
   }
 
-  private onChunk(data: Buffer): void {
-    const seq = this.nextSeq;
-    this.nextSeq += 1;
-    const receiptTimeMs = Date.now();
-    if (seq === 0) this.initSegment = Buffer.from(data);
-    this.buffer.push(data, receiptTimeMs, seq);
-    this.pendingModeration.add(seq);
-    moderateChunk({ seq, audio: data, rules: this.rules })
+  /** Binary with no preceding media header is treated as a webm chunk (back-compat). */
+  private onBinary(data: Buffer): void {
+    const meta = this.pendingMeta;
+    this.pendingMeta = null;
+    const kind = meta?.kind ?? 'webm';
+    const studioSeq = meta?.seq ?? this.nextSeq;
+    let pending = this.pendingMedia.get(studioSeq);
+    if (!pending) {
+      pending = { webm: null, wav: null, serverSeq: null, studioSeq, timer: null, started: false };
+      this.pendingMedia.set(studioSeq, pending);
+    }
+    if (kind === 'wav') {
+      pending.wav = data;
+    } else {
+      const serverSeq = this.nextSeq;
+      this.nextSeq += 1;
+      const receiptTimeMs = Date.now();
+      if (serverSeq === 0) this.initSegment = Buffer.from(data);
+      this.buffer.push(data, receiptTimeMs, serverSeq);
+      pending.webm = { data, receiptTimeMs };
+      pending.serverSeq = serverSeq;
+      this.pendingModeration.add(serverSeq);
+      pending.timer = setTimeout(() => this.startModeration(studioSeq), this.audioWaitMs);
+      if (typeof pending.timer.unref === 'function') pending.timer.unref();
+    }
+    if (pending.webm && pending.wav) {
+      this.startModeration(studioSeq);
+    }
+  }
+
+  private startModeration(studioSeq: number): void {
+    const pending = this.pendingMedia.get(studioSeq);
+    if (!pending || pending.started || pending.serverSeq === null || !pending.webm) return;
+    pending.started = true;
+    if (pending.timer) clearTimeout(pending.timer);
+    this.pendingMedia.delete(studioSeq);
+    const seq = pending.serverSeq;
+    const video = pending.webm.data;
+    const wav = pending.wav;
+    moderateChunk({
+      seq,
+      video,
+      wav,
+      rules: this.rules,
+      recentTranscript: this.recentTranscript(),
+      tracker: this.tracker,
+    })
       .then((res) => {
         this.decisions.set(seq, res.decisions);
+        if (res.transcriptText.trim().length > 0) {
+          this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
+        }
         this.pushLog(res.entry);
+        const hourly = projectedHourlyUsd(this.tracker.totalUsd, Date.now() - this.streamStartMs);
+        console.log(
+          `[cost] chunk #${seq} mode=${res.mode} +$${res.costUsd.toFixed(4)} ` +
+            `total=$${this.tracker.totalUsd.toFixed(4)} ~$${hourly.toFixed(2)}/h ` +
+            `(cap $${maxSpendUsd()}, ${moderationMode()})`,
+        );
       })
       .catch(() => {
-        // Fail open on transport, fail closed on visibility: hold the chunk
-        // until the next tick retries, keep a log entry either way.
         this.decisions.set(seq, []);
         this.pushLog({
           seq,
@@ -133,6 +223,14 @@ export class StreamHost {
       .finally(() => {
         this.pendingModeration.delete(seq);
       });
+  }
+
+  private recentTranscript(): string {
+    const cutoff = Date.now() - 60_000;
+    while (this.transcriptWindow.length > 0 && this.transcriptWindow[0].atMs < cutoff) {
+      this.transcriptWindow.shift();
+    }
+    return this.transcriptWindow.map((t) => t.text).join(' ');
   }
 
   private flush(): void {
