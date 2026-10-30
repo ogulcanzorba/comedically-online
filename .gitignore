@@ -1,0 +1,15 @@
+# deps / build
+node_modules/
+.next/
+out/
+
+# env (never commit real keys)
+.env
+.env*.local
+
+# logs / misc
+npm-debug.log*
+*.log
+coverage/
+.DS_Store
+tsconfig.tsbuildinfo

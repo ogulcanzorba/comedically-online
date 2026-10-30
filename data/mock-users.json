@@ -1,0 +1,4 @@
+{
+  "comedians": [{ "id": "c1", "name": "Demo Comedian", "handle": "@demo-comic" }],
+  "viewers": [{ "id": "v1", "name": "Demo Viewer" }]
+}
