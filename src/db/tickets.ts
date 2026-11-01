@@ -54,6 +54,43 @@ export function countByTier(showId: string): Record<string, number> {
   return out;
 }
 
+export interface UserTicket {
+  ticket_id: string;
+  tier: string;
+  price_cents: number;
+  order_ref: string;
+  show_id: string;
+  show_slug: string;
+  show_title: string;
+  starts_at_utc: string;
+  duration_min: number;
+}
+
+/** All tickets held by a user, newest show first, with show details. */
+export function listTicketsByUser(userId: string): UserTicket[] {
+  return getDb()
+    .prepare(
+      `SELECT t.id AS ticket_id, t.tier, t.price_cents, t.order_ref,
+              s.id AS show_id, s.slug AS show_slug, s.title AS show_title,
+              s.starts_at_utc, s.duration_min
+       FROM tickets t JOIN shows s ON s.id = t.show_id
+       WHERE t.user_id = ? ORDER BY s.starts_at_utc DESC`,
+    )
+    .all(userId) as UserTicket[];
+}
+
+/** Mock sales totals across all of a comedian's shows. */
+export function salesByComedian(comedianId: string): { sold: number; revenueCents: number } {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS sold, COALESCE(SUM(t.price_cents), 0) AS revenue
+       FROM tickets t JOIN shows s ON s.id = t.show_id
+       WHERE s.comedian_id = ?`,
+    )
+    .get(comedianId) as { sold: number; revenue: number };
+  return { sold: row.sold, revenueCents: row.revenue };
+}
+
 export function fakeOrderRef(): string {
   return `MOCK-${Date.now().toString(36).toUpperCase()}${Math.floor(Math.random() * 1296)
     .toString(36)

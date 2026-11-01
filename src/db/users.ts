@@ -95,3 +95,41 @@ export function findUserByEmail(email: string): UserRow | undefined {
 export function findUserById(id: string): UserRow | undefined {
   return getDb().prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRow | undefined;
 }
+
+export interface UpdateUserPatch {
+  display_name?: string;
+  bio?: string | null;
+  country?: string | null;
+  stage_name?: string | null;
+  comedy_styles?: string[];
+}
+
+export function updateUser(id: string, patch: UpdateUserPatch): UserRow | undefined {
+  const fields: string[] = [];
+  const values: Array<string | null> = [];
+  if (patch.display_name !== undefined) {
+    fields.push('display_name = ?');
+    values.push(patch.display_name);
+  }
+  if (patch.bio !== undefined) {
+    fields.push('bio = ?');
+    values.push(patch.bio);
+  }
+  if (patch.country !== undefined) {
+    fields.push('country = ?');
+    values.push(patch.country);
+  }
+  if (patch.stage_name !== undefined) {
+    fields.push('stage_name = ?');
+    values.push(patch.stage_name);
+  }
+  if (patch.comedy_styles !== undefined) {
+    fields.push('comedy_styles = ?');
+    values.push(JSON.stringify(patch.comedy_styles));
+  }
+  if (fields.length > 0) {
+    values.push(id);
+    getDb().prepare(`UPDATE users SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  }
+  return findUserById(id);
+}
