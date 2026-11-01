@@ -1,97 +1,88 @@
 # Comedically Online
 
-Live-streaming for stand-up comedians only. Hackathon MVP.
+Live stand-up streaming with comedy-aware moderation. Hackathon build (Phase 2: platform).
 
 **Live comedy. Moderated by someone who gets the joke.**
+
+> Legal pages (`/terms`, `/privacy`, `/cookies`, `/community-guidelines`,
+> `/moderation-policy`) are **template drafts**. They must be reviewed by a lawyer
+> before launch. Nothing here claims legal compliance.
 
 ## Run
 
 ```bash
 npm install
-cp .env.example .env   # set MODEL_API_KEY only for live moderation
+cp .env.example .env   # set SESSION_SECRET; MODEL_API_KEY only for live AI modes
+npm run seed           # 12 fictional comedians/shows + 2 viewers (SQLite file)
+npm run seed:tags      # backfill auto tags (mock rules by default)
 npm run dev            # http://localhost:3000
 ```
 
-Pages: `/` landing, `/studio` comedian, `/watch` viewer (locked until mock
-checkout), `/checkout` mock tickets.
+## Env vars
 
-## How it works
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `SESSION_SECRET` | dev-only fallback (warns) | HMAC for session cookies. Required in production. |
+| `SQLITE_FILE` | `data/comedically.db` | Local SQLite file (gitignored, WAL mode). |
+| `MODERATION_MODE` | `mock` | `mock` = scripted demo decisions; `live` = Meta models. |
+| `TAG_MODE` | `mock` | `mock` = keyword tags; `live` = muse-spark-1.3 tags. |
+| `MODEL_API_KEY` | — | Meta Model API key (baseURL `https://api.meta.ai/v1`). Never logged. |
+| `MAX_SPEND_USD` | `5` | Hard moderation spend cap per stream; over it falls back to mock. |
+| `NEXT_PUBLIC_SITE_URL` | `http://localhost:3000` | Canonical/OG/sitemap base URL. |
+| `PORT` / `PLAYBACK_DELAY_MS` | `3000` / `10000` | Server port / broadcast delay. |
 
-- `/studio` records 2s WebM chunks (`MediaRecorder`, timeslice 2000, vp8+opus)
-  plus a parallel 16kHz mono WAV for transcription, and sends both over one
-  WebSocket (`/ws?role=publisher`).
-- `server.ts` + `src/server/stream-host.ts` hold chunks in a ring buffer
-  (`src/lib/delay-buffer.ts`) and release each chunk **plus its moderation
-  decisions** to viewers exactly 10s after server receipt. First bytes carry
-  the WebM init segment; late joiners get it immediately.
-- `/watch` appends chunks in order via MediaSource, draws blur boxes over the
-  video, and mutes during bleep windows. The stream is never cut: only the
-  problem word or region is covered.
-- `/checkout` sells a mock ticket ($5) or subscription ($12/mo). Card fields
-  never leave the browser; success sets an unlock cookie for `/watch`.
-  Labelled **MOCK PAYMENT, no money is charged** throughout.
+## Seed accounts (password for all: `Comedy123!`)
 
-## Moderation (`src/moderation/`)
+- Comedians: `ada@example.com`, `milo@example.com`, `kerem@example.com`, `rosa@example.com`,
+  `benny@example.com`, `ingrid@example.com`, `tomas@example.com`, `ren@example.com`,
+  `priya@example.com`, `gus@example.com`, `lena@example.com`, `diego@example.com`
+- Viewers: `riley@example.com`, `sam@example.com` (both hold the 2 sellout tickets for “60 Jokes”)
+- Demo Night (`/shows/demo-night`) is live immediately with a free $0 mock pass — log in,
+  claim, watch.
 
-Modes via `MODERATION_MODE=mock|live` (default `mock`).
+## Features
 
-- `transcribeChunk` — Muse Voice Transcribe (`muse-voice-transcribe-1.0`,
-  `POST /asr/transcribe`, ENDPOINTING for turn-level times) in live mode;
-  scripted bits in mock mode.
-- `detectVisual` — SAM 3.1 (`sam-3.1`, Responses API, one concept per
-  request) over the 2s clip in live mode — never per-frame; fixed demo box
-  in mock mode.
-- `judgeContext` — `muse-spark-1.3` comedy-aware judge (joke/satire vs real
-  attack + the comedian's own house rules) in live mode; keyword stand-in
-  logic in mock mode.
-- Demo uses harmless stand-ins only: the invented word "blorpt", a fixed
-  phone-screen box, clean bits.
+- **Accounts**: viewer/comedian roles, bcrypt passwords, signed httpOnly sessions, login
+  rate limit, same-origin CSRF guard, 18+ confirmation, server-side validation.
+- **Shows**: public grid with category filter + search, SVG/gradient thumbnails, Live/Sold-out
+  badges; show pages with countdown, viewer-local start time, comedian profile, tiers, tags.
+- **Watch**: at start time the page becomes the player (10s broadcast delay, bleep/blur
+  overlay, never cuts). Requires login + ticket; `/watch` redirects to Demo Night.
+- **Studio**: go-live streaming plus `/studio/shows` show manager (local time + IANA zone →
+  UTC, tier editor with caps + pay-what-you-want, revenue calculator with stated
+  assumptions).
+- **Checkout**: mock only (MOCK label everywhere). Card fields never leave the browser; only
+  a fake order record is stored.
+- **Discovery**: 12 category pages with icons, mock/live auto-tagging (`TAG_MODE`), tag
+  chips, `/search?q=`.
+- **Brand/SEO**: ink/spotlight/coral system (`BRAND.md`), self-hosted fonts, SVG logo +
+  favicon, generated OG image, per-page metadata + canonicals, sitemap/robots, JSON-LD
+  (Organization, WebSite, ComedyEvent), skip link + focus styles.
+- **Legal/safety**: terms, privacy, cookies, community guidelines, moderation policy (what
+  the AI does/does not do + human appeals), contact, essential-cookies-only banner, footer.
 
-## Costs
+## How streaming + moderation work (unchanged from Phase 1)
 
-Priced in `src/moderation/cost.ts`: Voice $0.18/h, SAM video $0.20/1k
-frames, Spark $1.25/$4.25 per M input/output tokens. Every chunk logs
-`+$`/total/projected-$/h. `MAX_SPEND_USD` (default 5) is a hard cap: past
-it the pipeline falls back to mock automatically. Note: at full live
-fidelity SAM dominates (~60 frames per 2s chunk), so expect the cap to trip
-within a long set — that fallback is part of the demo.
-
-Live smoke test (one cheap call per model, <$0.05 total):
-
-```bash
-MODEL_API_KEY=... npm run smoke
-```
-
-The key is read from the environment only and is never logged.
+2s WebM chunks + parallel 16kHz WAV over one WebSocket; server ring buffer releases
+chunk + decisions exactly 10s after server receipt. Mock mode scripts bleeps/blurs;
+live mode uses Voice Transcribe + SAM 3.1 video + the Spark judge behind the spend cap.
 
 ## Checks
 
 ```bash
 npm run typecheck   # strict TS, must be clean
-npm test            # delay buffer + mock moderation + overlay timing
+npm test            # 8 suites (auth, delay, moderation, overlay, datetime, timezone, pricing, tags)
 npm run prove:relay # end-to-end relay proof with the real 10s delay (~15s)
-npm run build       # production build incl. middleware gate
+npm run build       # production build incl. middleware + sitemap
+npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
 ```
 
-## Demo rehearsal (mock mode)
+## Known limits
 
-1. Terminal: `npm run dev`. Browser A: `/studio`, allow camera/mic.
-2. Browser B: `/checkout`, pick Ticket, fill any fake card values, submit —
-   lands on `/watch`, sees "Moderation active".
-3. A clicks **Go live**. B's video starts ~10-12s later (10s delay + first
-   2s chunk). A narrates the house rules shown in the rules box.
-4. Scripted beats (chunk time → viewer sees +10s): ch2 bleep of "blorpt",
-   ch3 phone-screen blur, ch6 bleep, ch8 blur… A reads the moderation log
-   aloud as entries land; B sees the bleep pill and blur box in place while
-   the show never stops.
-5. A clicks **End stream**; B's player drains the delayed tail.
-
-## Known limits (MVP)
-
-- Single concurrent stream; state is in-memory (+ `data/mock-users.json`).
-- Chrome recommended (WebM/VP8 + MediaSource + AudioWorklet).
-- Bleep timing is turn-level (Voice returns turns, not words); the word's
-  proportional slice of its turn is muted.
-- Live SAM assumes the API accepts `video/webm` data URLs; unverified until
-  `npm run smoke` runs with a key. Mock is the default for this reason.
-- `tsx` runs the TS server/tests; plain `tsc`+`node` works too.
+- Single concurrent relay stream shared by all “live” show pages; tickets gate access, not
+  the transport. Multi-show isolation is future work.
+- SQLite file is local (no replication); in-memory rate limits reset on restart.
+- Bleep timing is turn-level (Voice returns turns, not words).
+- Live SAM assumes `video/webm` data URLs are accepted; unverified until `npm run smoke`
+  runs with a key. Mock stays the default.
+- No real payments, email, or recording storage — all intentionally mocked or omitted.
