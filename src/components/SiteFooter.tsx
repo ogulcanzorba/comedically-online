@@ -24,7 +24,7 @@ export function SiteFooter() {
           <ul className="mt-2 space-y-1.5 text-sm text-neutral-400">
             <li><Link href="/register" className="hover:text-white">Join as comedian</Link></li>
             <li><Link href="/studio/shows" className="hover:text-white">My shows</Link></li>
-            <li><Link href="/studio" className="hover:text-white">Go live</Link></li>
+            <li><Link href="/studio/go-live" className="hover:text-white">Go live</Link></li>
           </ul>
         </nav>
         <nav aria-label="Legal and safety">

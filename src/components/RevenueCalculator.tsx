@@ -18,7 +18,7 @@ export function RevenueCalculator() {
   const range = suggestedRange(Number(duration) || 60, weekend);
 
   return (
-    <section aria-label="Revenue calculator" className="rounded-md border border-neutral-800 bg-neutral-900/60 p-5">
+    <section id="revenue-calculator" aria-label="Revenue calculator" className="scroll-mt-20 rounded-md border border-neutral-800 bg-neutral-900/60 p-5">
       <h2 className="font-serif text-xl">Pricing helper</h2>
       <div className="mt-3 grid gap-3 sm:grid-cols-4">
         <label className="text-sm">
