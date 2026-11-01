@@ -5,6 +5,12 @@ import { CategoryIcon } from '@/components/CategoryIcon';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = {
+  title: 'Categories',
+  description: 'Every flavor of stand-up: roast, improv, satire, crowd work, and more.',
+  alternates: { canonical: '/categories' },
+};
+
 export default async function CategoriesPage() {
   const counts = new Map<string, number>();
   for (const s of listShows()) counts.set(s.category_slug, (counts.get(s.category_slug) ?? 0) + 1);

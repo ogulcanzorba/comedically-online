@@ -4,8 +4,13 @@ import { findUserById } from '@/db/users';
 import { countByTier } from '@/db/tickets';
 import { CATEGORIES } from '@/data/categories';
 import { ShowCard } from '@/components/ShowCard';
+import { JsonLd, siteUrl } from '@/components/JsonLd';
 
 export const dynamic = 'force-dynamic';
+
+export const metadata = {
+  alternates: { canonical: '/' },
+};
 
 export default async function HomePage({
   searchParams,
@@ -17,8 +22,30 @@ export default async function HomePage({
   const q = (params.q ?? '').trim();
   const shows = listShows({ category: category || undefined, q: q || undefined });
 
+  const base = siteUrl();
   return (
     <main className="relative">
+      <JsonLd
+        data={{
+          '@context': 'https://schema.org',
+          '@type': 'Organization',
+          name: 'Comedically Online',
+          url: base,
+          logo: `${base}/icon.svg`,
+        }}
+      />
+      <JsonLd
+        data={{
+          '@context': 'https://schema.org',
+          '@type': 'WebSite',
+          name: 'Comedically Online',
+          url: base,
+          potentialAction: {
+            '@type': 'SearchAction',
+            target: `${base}/search?q={query}`,
+          },
+        }}
+      />
       <div
         aria-hidden
         className="pointer-events-none absolute inset-x-0 top-0 h-96"

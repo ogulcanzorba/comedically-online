@@ -9,6 +9,17 @@ import { ShowCard } from '@/components/ShowCard';
 
 export const dynamic = 'force-dynamic';
 
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }) {
+  const { slug } = await params;
+  const category = categoryBySlug(slug);
+  if (!category) return { title: 'Category not found' };
+  return {
+    title: category.name,
+    description: category.description,
+    alternates: { canonical: `/categories/${slug}` },
+  };
+}
+
 export default async function CategoryPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const category = categoryBySlug(slug);

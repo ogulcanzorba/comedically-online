@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import type { Metadata } from 'next';
 import { getShowBySlug } from '@/db/shows';
 import { findUserById } from '@/db/users';
 import { countByTier, hasTicket } from '@/db/tickets';
@@ -12,8 +13,23 @@ import { LocalTime } from '@/components/LocalTime';
 import { Countdown } from '@/components/Countdown';
 import { ShowPlayer } from '@/components/ShowPlayer';
 import { TagChips } from '@/components/TagChips';
+import { JsonLd, siteUrl } from '@/components/JsonLd';
 
 export const dynamic = 'force-dynamic';
+
+export async function generateMetadata({ params }: { params: Promise<{ slug: string }> }): Promise<Metadata> {
+  const { slug } = await params;
+  const show = getShowBySlug(slug);
+  if (!show) return { title: 'Show not found' };
+  const description = show.description.slice(0, 160);
+  return {
+    title: show.title,
+    description,
+    alternates: { canonical: `/shows/${show.slug}` },
+    openGraph: { title: show.title, description },
+    twitter: { title: show.title, description },
+  };
+}
 
 export default async function ShowPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
@@ -27,8 +43,33 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
   const user = await getSessionUser();
   const ticketHeld = user ? hasTicket(user.id, show.id) : false;
 
+  const startMs = Date.parse(show.starts_at_utc);
   return (
     <main className="mx-auto max-w-4xl px-6 py-8">
+      <JsonLd
+        data={{
+          '@context': 'https://schema.org',
+          '@type': 'ComedyEvent',
+          name: show.title,
+          description: show.description,
+          startDate: show.starts_at_utc,
+          endDate: new Date(startMs + show.duration_min * 60_000).toISOString(),
+          eventStatus: 'https://schema.org/EventScheduled',
+          location: { '@type': 'VirtualLocation', url: `${siteUrl()}/shows/${show.slug}` },
+          performer: { '@type': 'Person', name: comedian?.stage_name ?? comedian?.display_name ?? 'Unknown comic' },
+          offers: show.tiers.map((t) => ({
+            '@type': 'Offer',
+            name: t.name,
+            price: (t.price_cents / 100).toFixed(2),
+            priceCurrency: 'USD',
+            availability:
+              t.cap !== undefined && (sold[t.id] ?? 0) >= t.cap
+                ? 'https://schema.org/SoldOut'
+                : 'https://schema.org/InStock',
+            url: `${siteUrl()}/shows/${show.slug}`,
+          })),
+        }}
+      />
       <Link href="/" className="text-sm text-neutral-400 hover:text-neutral-200">
         ← All shows
       </Link>

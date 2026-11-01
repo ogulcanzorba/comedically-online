@@ -5,6 +5,12 @@ import { ShowCard } from '@/components/ShowCard';
 
 export const dynamic = 'force-dynamic';
 
+export const metadata = {
+  title: 'Search',
+  description: 'Search shows by title, description, or tag.',
+  alternates: { canonical: '/search' },
+};
+
 export default async function SearchPage({ searchParams }: { searchParams?: Promise<{ q?: string }> }) {
   const q = ((await searchParams)?.q ?? '').trim();
   const results = q ? searchShows(q) : [];

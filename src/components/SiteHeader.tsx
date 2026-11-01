@@ -1,14 +1,15 @@
 import Link from 'next/link';
 import { getSessionUser } from '@/auth/get-session';
 import { LogoutButton } from './LogoutButton';
+import { Logo } from './Logo';
 
 export async function SiteHeader() {
   const user = await getSessionUser();
   return (
     <header className="border-b border-neutral-800">
       <div className="mx-auto flex max-w-5xl items-center gap-6 px-6 py-3">
-        <Link href="/" className="font-serif text-lg font-bold">
-          Comedically <span className="text-amber-300">Online</span>
+        <Link href="/" aria-label="Comedically Online home">
+          <Logo />
         </Link>
         <nav className="flex gap-4 text-sm" aria-label="Main">
           <Link href="/" className="text-neutral-300 hover:text-white">
