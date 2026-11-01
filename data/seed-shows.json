@@ -1,0 +1,269 @@
+{
+  "comedians": [
+    {
+      "key": "ada",
+      "email": "ada@example.com",
+      "displayName": "Ada Larkspur",
+      "stageName": "Ada Larkspur",
+      "bio": "Host of Demo Night. High-energy stand-up about group chats, landlords, and a sourdough starter named Gerald.",
+      "styles": ["stand-up", "crowd work"],
+      "country": "United States"
+    },
+    {
+      "key": "milo",
+      "email": "milo@example.com",
+      "displayName": "Milo Fern",
+      "stageName": "Milo Fern",
+      "bio": "British overthinker. Finds the existential dread in queueing, kettles, and weather small talk.",
+      "styles": ["observational", "one-liners"],
+      "country": "United Kingdom"
+    },
+    {
+      "key": "kerem",
+      "email": "kerem@example.com",
+      "displayName": "Kerem Bulut",
+      "stageName": "Kerem Bulut",
+      "bio": "Istanbul-raised, Berlin-based. Jokes in two languages about expat life, bureaucracy, and his mother's voice notes.",
+      "styles": ["satire", "bilingual"],
+      "country": "Türkiye"
+    },
+    {
+      "key": "rosa",
+      "email": "rosa@example.com",
+      "displayName": "Rosa Delacroix",
+      "stageName": "Rosa Delacroix",
+      "bio": "Parisian storyteller turning metro rides and dating-app dates into five-minute tragedies with punchlines.",
+      "styles": ["storytelling", "crowd work"],
+      "country": "France"
+    },
+    {
+      "key": "benny",
+      "email": "benny@example.com",
+      "displayName": "Benny Okafor",
+      "stageName": "Benny O.",
+      "bio": "Lagos to London. Warm, rapid-fire observations on family group chats and airport security.",
+      "styles": ["observational", "crowd work"],
+      "country": "Nigeria"
+    },
+    {
+      "key": "ingrid",
+      "email": "ingrid@example.com",
+      "displayName": "Ingrid Voss",
+      "stageName": "Ingrid Voss",
+      "bio": "Deadpan German precision. Dark humor about productivity culture, flat-pack furniture, and her houseplants' will to live.",
+      "styles": ["dark humor", "satire"],
+      "country": "Germany"
+    },
+    {
+      "key": "tomas",
+      "email": "tomas@example.com",
+      "displayName": "Tomás Rivera",
+      "stageName": "Tommy Rivera",
+      "bio": "Madrid improviser. Builds entire scenes from one audience word, usually about someone's ex.",
+      "styles": ["improv", "crowd work"],
+      "country": "Spain"
+    },
+    {
+      "key": "ren",
+      "email": "ren@example.com",
+      "displayName": "Ren Ishida",
+      "stageName": "Ren Ishida",
+      "bio": "Osaka's most awkward export. One-liners and glorious on-stage failure, on purpose. Probably.",
+      "styles": ["one-liners", "cringe"],
+      "country": "Japan"
+    },
+    {
+      "key": "priya",
+      "email": "priya@example.com",
+      "displayName": "Priya Nair",
+      "stageName": "Priya Nair",
+      "bio": "Sharp political satire with a storyteller's heart. Reads the news so you can laugh instead of cry.",
+      "styles": ["political satire", "storytelling"],
+      "country": "India"
+    },
+    {
+      "key": "gus",
+      "email": "gus@example.com",
+      "displayName": "Gus McAllister",
+      "stageName": "Gus Roast",
+      "bio": "Melbourne roast battler. Insults you lovingly, then shouts you a drink. Consent forms at the door.",
+      "styles": ["roast", "crowd work"],
+      "country": "Australia"
+    },
+    {
+      "key": "lena",
+      "email": "lena@example.com",
+      "displayName": "Lena Petrova",
+      "stageName": "Lena P.",
+      "bio": "Kyiv-born comic finding gallows humor in blackouts, dating apps, and bureaucracy.",
+      "styles": ["dark humor", "storytelling"],
+      "country": "Ukraine"
+    },
+    {
+      "key": "diego",
+      "email": "diego@example.com",
+      "displayName": "Diego Fuentes",
+      "stageName": "Diego Fuentes",
+      "bio": "Mexico City satirist. Sketches and stand-up about telenovelas, traffic, and his abuela's conspiracy theories.",
+      "styles": ["satire", "improv"],
+      "country": "Mexico"
+    }
+  ],
+  "viewers": [
+    { "email": "riley@example.com", "displayName": "Riley Chen", "country": "Canada" },
+    { "email": "sam@example.com", "displayName": "Sam Carter", "country": "United States" }
+  ],
+  "shows": [
+    {
+      "slug": "demo-night",
+      "comedian": "ada",
+      "title": "Demo Night: Live from the Living Room",
+      "description": "Our always-on demo stage. Ada tests new bits, the moderator tests new bleeps. Free forever, strictly fictional.",
+      "category": "stand-up",
+      "startsInHours": 0,
+      "durationMin": 10080,
+      "tiers": [{ "id": "demo-pass", "name": "Demo Pass", "price_cents": 0 }],
+      "theme": "ember"
+    },
+    {
+      "slug": "overthinking-everything",
+      "comedian": "milo",
+      "title": "Overthinking Everything",
+      "description": "An hour of spiralling about kettles, queues, and replying 'you too' when the waiter says enjoy your meal.",
+      "category": "observational",
+      "startsInHours": 26,
+      "durationMin": 60,
+      "tiers": [
+        { "id": "early", "name": "Early Bird", "price_cents": 500, "cap": 50 },
+        { "id": "standard", "name": "Standard", "price_cents": 900 },
+        { "id": "vip", "name": "VIP", "price_cents": 1800, "cap": 20 }
+      ],
+      "theme": "slate"
+    },
+    {
+      "slug": "two-languages-one-mother",
+      "comedian": "kerem",
+      "title": "Two Languages, One Mother",
+      "description": "TR-EN bilingual hour on expat life. Turkish and English, sometimes mid-sentence. Aynen öyle, exactly.",
+      "category": "bilingual-tr-en",
+      "startsInHours": 50,
+      "durationMin": 75,
+      "tiers": [
+        { "id": "standard", "name": "Standard", "price_cents": 1000 },
+        { "id": "vip", "name": "VIP", "price_cents": 2000, "cap": 30 }
+      ],
+      "theme": "teal"
+    },
+    {
+      "slug": "metro-tragedies",
+      "comedian": "rosa",
+      "title": "Metro Tragedies",
+      "description": "True-ish stories from line 4: missed connections, dropped croissants, and one unforgettable accordion player.",
+      "category": "storytelling",
+      "startsInHours": 74,
+      "durationMin": 60,
+      "tiers": [{ "id": "standard", "name": "Standard", "price_cents": 800 }],
+      "theme": "rose"
+    },
+    {
+      "slug": "family-group-chat",
+      "comedian": "benny",
+      "title": "The Family Group Chat",
+      "description": "243 unread messages and counting. Benny reads his family's finest forwards so you don't have to.",
+      "category": "crowd-work",
+      "startsInHours": 98,
+      "durationMin": 45,
+      "tiers": [
+        { "id": "early", "name": "Early Bird", "price_cents": 400, "cap": 100 },
+        { "id": "standard", "name": "Standard", "price_cents": 700 }
+      ],
+      "theme": "gold"
+    },
+    {
+      "slug": "optimized-misery",
+      "comedian": "ingrid",
+      "title": "Optimized Misery",
+      "description": "A productivity-guru takedown in 12 bullet points. Attendees receive a certificate of inefficiency.",
+      "category": "dark-humor",
+      "startsInHours": 122,
+      "durationMin": 60,
+      "tiers": [
+        { "id": "standard", "name": "Standard", "price_cents": 1200 },
+        { "id": "vip", "name": "VIP", "price_cents": 2400, "cap": 15 }
+      ],
+      "theme": "forest"
+    },
+    {
+      "slug": "yes-and-my-ex",
+      "comedian": "tomas",
+      "title": "Yes, And... My Ex",
+      "description": "Fully improvised scenes built from your one-word suggestions. Pay what you want, laugh whether you want to or not.",
+      "category": "improv",
+      "startsInHours": 150,
+      "durationMin": 90,
+      "tiers": [{ "id": "pwyw", "name": "Pay what you want", "price_cents": 1200, "min_cents": 300 }],
+      "theme": "coral"
+    },
+    {
+      "slug": "failing-upwards",
+      "comedian": "ren",
+      "title": "Failing Upwards",
+      "description": "Thirty minutes of jokes that almost work, delivered with total confidence. The failures are the show.",
+      "category": "cringe",
+      "startsInHours": 175,
+      "durationMin": 30,
+      "tiers": [{ "id": "standard", "name": "Standard", "price_cents": 500 }],
+      "theme": "moss"
+    },
+    {
+      "slug": "headlines-and-punchlines",
+      "comedian": "priya",
+      "title": "Headlines & Punchlines",
+      "description": "The week's news, filleted live. No politicians were spared in the making of this show.",
+      "category": "political-satire",
+      "startsInHours": 200,
+      "durationMin": 75,
+      "tiers": [
+        { "id": "early", "name": "Early Bird", "price_cents": 600, "cap": 40 },
+        { "id": "standard", "name": "Standard", "price_cents": 1100 }
+      ],
+      "theme": "ocean"
+    },
+    {
+      "slug": "roasted-lovingly",
+      "comedian": "gus",
+      "title": "Roasted, Lovingly",
+      "description": "Gus roasts volunteers from the chat. Front-row seats include emotional damage and a complimentary ice pack.",
+      "category": "roast",
+      "startsInHours": 230,
+      "durationMin": 60,
+      "tiers": [
+        { "id": "standard", "name": "Standard", "price_cents": 900, "cap": 200 },
+        { "id": "front-row", "name": "Front Row Roast", "price_cents": 2000, "cap": 10 }
+      ],
+      "theme": "copper"
+    },
+    {
+      "slug": "blackout-diaries",
+      "comedian": "lena",
+      "title": "Blackout Diaries",
+      "description": "Jokes by candlelight about power cuts, bad dates, and paperwork that reproduces when ignored.",
+      "category": "satire",
+      "startsInHours": 300,
+      "durationMin": 60,
+      "tiers": [{ "id": "standard", "name": "Standard", "price_cents": 1000 }],
+      "theme": "night"
+    },
+    {
+      "slug": "sixty-jokes",
+      "comedian": "diego",
+      "title": "60 Jokes, 60 Minutes",
+      "description": "One joke per minute or your mock money back. A tiny room, a huge clock, zero mercy.",
+      "category": "one-liners",
+      "startsInHours": 380,
+      "durationMin": 60,
+      "tiers": [{ "id": "standard", "name": "Standard", "price_cents": 800, "cap": 2 }],
+      "theme": "berry"
+    }
+  ]
+}

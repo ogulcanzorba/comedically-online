@@ -7,6 +7,10 @@ out/
 .env
 .env*.local
 
+# sqlite (local file DB; recreated by npm run seed)
+*.db
+*.db-*
+
 # logs / misc
 npm-debug.log*
 *.log
