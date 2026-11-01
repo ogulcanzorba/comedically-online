@@ -9,6 +9,7 @@
     "test": "tsx --test tests/*.test.ts",
     "prove:relay": "tsx scripts/prove-relay.ts",
     "seed": "tsx scripts/seed.ts",
+    "seed:tags": "tsx scripts/seed-tags.ts",
     "smoke": "tsx scripts/smoke.ts",
     "typecheck": "tsc --noEmit"
   },

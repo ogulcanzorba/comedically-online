@@ -6,6 +6,8 @@ import { checkSameOrigin } from '@/auth/csrf';
 import { localToUtcIso } from '@/lib/timezone';
 import { categoryBySlug } from '@/data/categories';
 import { THEMES } from '@/data/themes';
+import { setShowTags } from '@/db/tags';
+import { autoTag } from '@/tags/index';
 
 /** Shared show-payload validation for create + update. */
 export interface ShowPayload {
@@ -107,5 +109,11 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     tiers: v.tiers,
     thumbnailTheme: v.thumbnailTheme,
   });
+  setShowTags(show.id, [v.categorySlug], 'category');
+  try {
+    setShowTags(show.id, await autoTag(v.title, v.description, v.categorySlug), 'auto');
+  } catch {
+    // tagging must never break show creation
+  }
   return NextResponse.json({ ok: true, show });
 }

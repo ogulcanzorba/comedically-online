@@ -14,6 +14,9 @@ export async function SiteHeader() {
           <Link href="/" className="text-neutral-300 hover:text-white">
             Shows
           </Link>
+          <Link href="/categories" className="text-neutral-300 hover:text-white">
+            Categories
+          </Link>
           {user?.role === 'comedian' && (
             <>
               <Link href="/studio/shows" className="text-neutral-300 hover:text-white">

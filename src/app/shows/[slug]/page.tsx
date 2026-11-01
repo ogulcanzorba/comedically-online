@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { getShowBySlug } from '@/db/shows';
 import { findUserById } from '@/db/users';
 import { countByTier, hasTicket } from '@/db/tickets';
+import { getShowTags } from '@/db/tags';
 import { categoryBySlug } from '@/data/categories';
 import { getSessionUser } from '@/auth/get-session';
 import { formatCents, isSoldOut, showStatus } from '@/lib/datetime';
@@ -10,6 +11,7 @@ import { ShowArt } from '@/components/ShowArt';
 import { LocalTime } from '@/components/LocalTime';
 import { Countdown } from '@/components/Countdown';
 import { ShowPlayer } from '@/components/ShowPlayer';
+import { TagChips } from '@/components/TagChips';
 
 export const dynamic = 'force-dynamic';
 
@@ -103,6 +105,10 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
       <section aria-label="Comedian" className="mt-8 rounded-md border border-neutral-800 bg-neutral-900/60 p-5">
         <h2 className="font-serif text-xl">{comedian?.stage_name ?? comedian?.display_name}</h2>
         {comedian?.bio && <p className="mt-2 text-sm text-neutral-300">{comedian.bio}</p>}
+      </section>
+
+      <section aria-label="Tags" className="mt-8">
+        <TagChips tags={getShowTags(show.id)} />
       </section>
 
       <section aria-label="Tickets" className="mt-8">

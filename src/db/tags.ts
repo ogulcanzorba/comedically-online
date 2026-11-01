@@ -33,6 +33,13 @@ export function setShowTags(showId: string, slugs: string[], source: string): vo
   tx(slugs);
 }
 
+export function hasSourceTags(showId: string, source: string): boolean {
+  const row = getDb()
+    .prepare('SELECT 1 AS ok FROM show_tags WHERE show_id = ? AND source = ? LIMIT 1')
+    .get(showId, source) as { ok: number } | undefined;
+  return row !== undefined;
+}
+
 export function getShowTags(showId: string): Tag[] {
   return getDb()
     .prepare(

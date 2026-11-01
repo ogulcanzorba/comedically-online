@@ -181,3 +181,18 @@ export function listShows(opts: ListShowsOpts = {}): Show[] {
     .all(...values, opts.limit ?? 100) as ShowRow[];
   return rows.map(toShow);
 }
+
+/** Full search across titles, descriptions, and tags. */
+export function searchShows(q: string, limit = 50): Show[] {
+  const like = `%${q}%`;
+  const rows = getDb()
+    .prepare(
+      `SELECT DISTINCT s.* FROM shows s
+       LEFT JOIN show_tags st ON st.show_id = s.id
+       LEFT JOIN tags t ON t.slug = st.tag_slug
+       WHERE s.title LIKE ? OR s.description LIKE ? OR t.slug LIKE ? OR t.label LIKE ?
+       ORDER BY s.starts_at_utc ASC LIMIT ?`,
+    )
+    .all(like, like, like, like, limit) as ShowRow[];
+  return rows.map(toShow);
+}
