@@ -1,52 +1,107 @@
 import Link from 'next/link';
+import { listShows } from '@/db/shows';
+import { findUserById } from '@/db/users';
+import { countByTier } from '@/db/tickets';
+import { CATEGORIES } from '@/data/categories';
+import { ShowCard } from '@/components/ShowCard';
 
-export default function LandingPage() {
+export const dynamic = 'force-dynamic';
+
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ category?: string; q?: string }>;
+}) {
+  const params = (await searchParams) ?? {};
+  const category = params.category ?? '';
+  const q = (params.q ?? '').trim();
+  const shows = listShows({ category: category || undefined, q: q || undefined });
+
   return (
-    <main className="relative min-h-screen overflow-hidden bg-neutral-950">
-      {/* Warm stage spotlight cone */}
+    <main className="relative">
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0"
+        className="pointer-events-none absolute inset-x-0 top-0 h-96"
         style={{
           background:
-            'radial-gradient(ellipse 60% 45% at 50% -5%, rgba(255, 214, 140, 0.22), transparent 70%), radial-gradient(ellipse 30% 22% at 50% 38%, rgba(255, 214, 140, 0.1), transparent 70%)',
+            'radial-gradient(ellipse 60% 45% at 50% -5%, rgba(255, 214, 140, 0.22), transparent 70%)',
         }}
       />
-      <div className="relative mx-auto flex min-h-screen max-w-3xl flex-col px-6 py-10">
-        <p className="inline-flex w-fit items-center gap-2 rounded-full border border-amber-200/30 bg-amber-100/10 px-3 py-1 text-xs text-amber-100">
+      <div className="relative mx-auto max-w-5xl px-6 pb-16">
+        <p className="mt-8 inline-flex w-fit items-center gap-2 rounded-full border border-amber-200/30 bg-amber-100/10 px-3 py-1 text-xs text-amber-100">
           Test build: demo video coming soon
         </p>
-
-        <div className="flex flex-1 flex-col justify-center py-16">
-          <p className="text-sm font-medium tracking-wide text-amber-200/80">Comedically Online</p>
-          <h1 className="mt-3 font-serif text-5xl leading-tight sm:text-6xl">
-            Live comedy.
-            <br />
-            <span className="text-neutral-300">Moderated by someone who gets the joke.</span>
-          </h1>
-          <p className="mt-5 max-w-xl text-neutral-400">
-            One stage, one stream, ten seconds of broadcast delay. Jokes stay up; only the
-            genuinely problematic word or pixel gets covered.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Link
-              href="/watch"
-              className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
-            >
-              Watch live
-            </Link>
-            <Link
-              href="/studio"
-              className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
-            >
-              Go live as a comedian
-            </Link>
-          </div>
+        <h1 className="mt-4 font-serif text-5xl leading-tight">
+          Live comedy.
+          <br />
+          <span className="text-neutral-300">Moderated by someone who gets the joke.</span>
+        </h1>
+        <p className="mt-4 max-w-xl text-neutral-400">
+          One stage per show, ten seconds of broadcast delay. Pick a show, grab a (mock) ticket,
+          and watch the jokes land.
+        </p>
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Link
+            href="/shows/demo-night"
+            className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
+          >
+            Watch Demo Night free
+          </Link>
+          <Link
+            href="/register"
+            className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
+          >
+            Go live as a comedian
+          </Link>
         </div>
 
-        <footer className="text-xs text-neutral-500">
-          Hackathon MVP: single stream, mock tickets, harmless demo stand-ins only.
-        </footer>
+        <form method="GET" className="mt-12 flex flex-wrap gap-3" role="search">
+          <label className="sr-only" htmlFor="q">
+            Search shows
+          </label>
+          <input
+            id="q"
+            name="q"
+            defaultValue={q}
+            placeholder="Search shows…"
+            className="min-w-52 flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm"
+          />
+          <label className="sr-only" htmlFor="category">
+            Filter by category
+          </label>
+          <select
+            id="category"
+            name="category"
+            defaultValue={category}
+            className="rounded-md border border-neutral-700 bg-neutral-900 px-4 py-2 text-sm"
+          >
+            <option value="">All categories</option>
+            {CATEGORIES.map((c) => (
+              <option key={c.slug} value={c.slug}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <button type="submit" className="rounded-md border border-neutral-600 px-5 py-2 text-sm hover:border-neutral-400">
+            Filter
+          </button>
+        </form>
+
+        <section aria-label="Shows" className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+          {shows.map((show) => (
+            <ShowCard
+              key={show.id}
+              show={show}
+              comedianName={findUserById(show.comedian_id)?.stage_name ?? 'Unknown comic'}
+              sold={countByTier(show.id)}
+            />
+          ))}
+        </section>
+        {shows.length === 0 && (
+          <p className="mt-8 text-neutral-400">
+            No shows match. Try another search — or run <code>npm run seed</code> if the DB is empty.
+          </p>
+        )}
       </div>
     </main>
   );
