@@ -1,19 +1,5 @@
 import { useId } from 'react';
-
-const THEMES: Record<string, [string, string, string]> = {
-  ember: ['#431407', '#9a3412', '#fbbf24'],
-  slate: ['#020617', '#334155', '#94a3b8'],
-  teal: ['#042f2e', '#0f766e', '#5eead4'],
-  rose: ['#4c0519', '#be123c', '#fda4af'],
-  gold: ['#451a03', '#b45309', '#fde68a'],
-  forest: ['#052e16', '#15803d', '#86efac'],
-  coral: ['#431407', '#c2410c', '#fdba74'],
-  moss: ['#1a2e05', '#4d7c0f', '#bef264'],
-  ocean: ['#082f49', '#0369a1', '#7dd3fc'],
-  copper: ['#3b0a0a', '#9a3412', '#fca5a5'],
-  night: ['#0c0a09', '#44403c', '#e7e5e4'],
-  berry: ['#3b0764', '#7e22ce', '#d8b4fe'],
-};
+import { themeById } from '@/data/themes';
 
 /** Generated SVG thumbnail: gradient + spotlight cone + mic dot. No image API. */
 export function ShowArt({
@@ -26,7 +12,7 @@ export function ShowArt({
   className?: string;
 }) {
   const uid = useId().replace(/:/g, '');
-  const [deep, mid, glow] = THEMES[theme] ?? THEMES.ember;
+  const { deep, mid, glow } = themeById(theme);
   return (
     <svg viewBox="0 0 400 225" className={className} role="img" aria-label={`${title} artwork`}>
       <defs>
