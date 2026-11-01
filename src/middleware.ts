@@ -16,4 +16,4 @@ export function middleware(req: NextRequest): NextResponse {
   return NextResponse.next();
 }
 
-export const config = { matcher: ['/studio/:path*', '/checkout/:path*'] };
+export const config = { matcher: ['/studio/:path*', '/checkout/:path*', '/profile'] };

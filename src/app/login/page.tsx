@@ -27,6 +27,7 @@ export default function LoginPage() {
       if (!res.ok || !data.ok) throw new Error(data.error ?? 'login failed');
       const next = new URLSearchParams(window.location.search).get('next') || '/';
       router.push(next.startsWith('/') && !next.startsWith('//') ? next : '/');
+      router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'login failed');
       setBusy(false);

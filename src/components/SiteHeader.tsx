@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import { getSessionUser } from '@/auth/get-session';
-import { LogoutButton } from './LogoutButton';
+import { UserMenu } from './UserMenu';
 import { Logo } from './Logo';
 
+/** Server header: reads the session per request, so it never shows stale auth state. */
 export async function SiteHeader() {
   const user = await getSessionUser();
   return (
@@ -23,7 +24,7 @@ export async function SiteHeader() {
               <Link href="/studio/shows" className="text-neutral-300 hover:text-white">
                 My shows
               </Link>
-              <Link href="/studio" className="text-neutral-300 hover:text-white">
+              <Link href="/studio/go-live" className="text-neutral-300 hover:text-white">
                 Go live
               </Link>
             </>
@@ -31,10 +32,7 @@ export async function SiteHeader() {
         </nav>
         <div className="ml-auto flex items-center gap-4 text-sm">
           {user ? (
-            <>
-              <span className="text-neutral-400">{user.displayName}</span>
-              <LogoutButton />
-            </>
+            <UserMenu user={{ displayName: user.displayName, role: user.role }} />
           ) : (
             <>
               <Link href="/login" className="text-neutral-300 hover:text-white">

@@ -10,6 +10,9 @@ const bodyFont = Public_Sans({ subsets: ['latin'], variable: '--font-body' });
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000';
 
+/** Always render per request: the header reads the session and must never go stale. */
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
   metadataBase: new URL(siteUrl),
   title: {

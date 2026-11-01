@@ -48,6 +48,7 @@ export default function RegisterPage() {
       const data = (await res.json()) as { ok: boolean; error?: string };
       if (!res.ok || !data.ok) throw new Error(data.error ?? 'registration failed');
       router.push(role === 'comedian' ? '/studio' : '/');
+      router.refresh();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'registration failed');
       setBusy(false);
