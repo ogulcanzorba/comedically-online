@@ -15,9 +15,14 @@ export async function SiteHeader() {
             Shows
           </Link>
           {user?.role === 'comedian' && (
-            <Link href="/studio" className="text-neutral-300 hover:text-white">
-              Studio
-            </Link>
+            <>
+              <Link href="/studio/shows" className="text-neutral-300 hover:text-white">
+                My shows
+              </Link>
+              <Link href="/studio" className="text-neutral-300 hover:text-white">
+                Go live
+              </Link>
+            </>
           )}
         </nav>
         <div className="ml-auto flex items-center gap-4 text-sm">
