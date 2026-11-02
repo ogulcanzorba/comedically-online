@@ -48,9 +48,15 @@ npm run dev            # http://localhost:3000
   badges; show pages with countdown, viewer-local start time, comedian profile, tiers, tags.
 - **Watch**: at start time the page becomes the player (10s broadcast delay, bleep/blur
   overlay, never cuts). Requires login + ticket; `/watch` redirects to Demo Night.
-- **Studio**: go-live streaming plus `/studio/shows` show manager (local time + IANA zone →
-  UTC, tier editor with caps + pay-what-you-want, revenue calculator with stated
-  assumptions).
+- **Studio** (comedian-only): overview dashboard with tool cards, `/studio/shows` show
+  manager (local time + IANA zone → UTC, tier editor with caps + pay-what-you-want,
+  revenue calculator with stated assumptions), per-show pre-live pages (rulebook
+  acceptance, self-view + delayed viewer view, live moderation log, censored-moments
+  recap), and the broadcast page at `/studio/go-live` (gated on rulebook acceptance).
+- **Rulebook** (`src/moderation/rulebook.json`, v1.0.0): the data behind mock moderation —
+  1 audio bleep rule (“waffle”) + 2 video blur rules (three-finger gesture, nose touch).
+  Every decision records its rule id + user-facing explanation; comedians must accept the
+  current revision before broadcasting, and re-accept when it changes.
 - **Checkout**: mock only (MOCK label everywhere). Card fields never leave the browser; only
   a fake order record is stored.
 - **Discovery**: 12 category pages with icons, mock/live auto-tagging (`TAG_MODE`), tag

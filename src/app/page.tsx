@@ -6,6 +6,7 @@ import { CATEGORIES } from '@/data/categories';
 import { ShowCard } from '@/components/ShowCard';
 import { JsonLd, siteUrl } from '@/components/JsonLd';
 import { getSessionUser } from '@/auth/get-session';
+import { homeVariant } from '@/auth/redirects';
 
 export const dynamic = 'force-dynamic';
 
@@ -23,6 +24,7 @@ export default async function HomePage({
   const q = (params.q ?? '').trim();
   const shows = listShows({ category: category || undefined, q: q || undefined });
   const user = await getSessionUser();
+  const variant = homeVariant(user);
 
   const base = siteUrl();
   return (
@@ -69,7 +71,7 @@ export default async function HomePage({
           One stage per show, ten seconds of broadcast delay. Pick a show, grab a (mock) ticket,
           and watch the jokes land.
         </p>
-        {user?.role === 'comedian' ? (
+        {variant === 'comedian' ? (
           <div className="mt-6 flex flex-wrap gap-3">
             <Link
               href="/studio"
@@ -84,7 +86,7 @@ export default async function HomePage({
               Prepare a live show
             </Link>
           </div>
-        ) : user ? (
+        ) : variant === 'viewer' ? (
           <div className="mt-6">
             <div className="flex flex-wrap gap-3">
               <Link
