@@ -1,0 +1,39 @@
+{
+  "version": "1.0.0",
+  "updated": "2026-11-02",
+  "rules": [
+    {
+      "id": "banned-word-waffle",
+      "modality": "audio",
+      "title": "No saying “waffle”",
+      "description": "The word “waffle” is banned from the stage. Applies to transcribed speech (text) and the audio itself: the matching slice is muted in place.",
+      "match": "waffle",
+      "action": "bleep",
+      "severity": "high",
+      "explanation": "“Waffle” is our harmless stand-in for a banned word. Saying it mutes just that word so the joke around it survives.",
+      "examples": ["“So I had waffle for breakfast” → the word is muted", "“Waffle.” → muted, show goes on"]
+    },
+    {
+      "id": "hand-gesture-three",
+      "modality": "video",
+      "title": "Three-finger hand gesture",
+      "description": "Holding up exactly three fingers toward the camera. Our harmless stand-in for a rude hand gesture. The hand region is blurred in place.",
+      "match": "hand showing three fingers",
+      "action": "blur",
+      "severity": "medium",
+      "explanation": "A three-finger gesture is blurred so the rest of the scene stays visible.",
+      "examples": ["Counting “one, two, three” on camera → hand blurred", "Waving with three fingers up → blurred"]
+    },
+    {
+      "id": "touching-nose",
+      "modality": "video",
+      "title": "Touching your nose",
+      "description": "Touching your own nose on camera. Our harmless stand-in for an offensive visual. The face region is blurred in place.",
+      "match": "finger touching nose",
+      "action": "blur",
+      "severity": "low",
+      "explanation": "Nose-touching is blurred as our stand-in for visuals we cannot show in a demo.",
+      "examples": ["Scratching your nose mid-bit → region blurred", "Pointing at your nose → blurred"]
+    }
+  ]
+}

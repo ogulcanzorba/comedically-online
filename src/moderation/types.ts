@@ -23,13 +23,6 @@ export interface NormBox {
   h: number;
 }
 
-export interface VisualFlag {
-  startMs: number;
-  endMs: number;
-  box: NormBox;
-  label: string;
-}
-
 export interface Decision {
   action: ModerationAction;
   reason: string;
@@ -38,6 +31,18 @@ export interface Decision {
   endMs?: number;
   box?: NormBox;
   label?: string;
+  /** Rulebook rule behind this decision, when one applies. */
+  ruleId?: string;
+  /** User-facing explanation of why (from the rulebook). */
+  explanation?: string;
+}
+
+export interface VisualFlag {
+  startMs: number;
+  endMs: number;
+  box: NormBox;
+  label: string;
+  ruleId?: string;
 }
 
 export interface ModerationLogEntry {
@@ -45,4 +50,6 @@ export interface ModerationLogEntry {
   at: string;
   action: ModerationAction;
   reason: string;
+  ruleId?: string;
+  explanation?: string;
 }

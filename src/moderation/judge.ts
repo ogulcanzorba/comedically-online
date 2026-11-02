@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import type { ModerationAction, ModerationMode } from './types';
-import { MOCK_BANNED_WORD } from './mock';
+import { MOCK_BANNED_RULE_ID, MOCK_BANNED_WORD } from './mock';
 import { PRICING } from './cost';
 
 const SPARK_MODEL = 'muse-spark-1.3';
@@ -31,7 +31,7 @@ function mockJudge(input: JudgeInput): JudgeVerdict {
   if (hay.includes(MOCK_BANNED_WORD)) {
     return {
       action: 'bleep',
-      reason: 'mock: ex-name stand-in breaks a house rule',
+      reason: `mock: banned word per rule ${MOCK_BANNED_RULE_ID ?? 'rulebook'}`,
       target: MOCK_BANNED_WORD,
     };
   }

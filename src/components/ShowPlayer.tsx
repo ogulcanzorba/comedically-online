@@ -24,6 +24,13 @@ export function ShowPlayer() {
   const windowsRef = useRef<DecisionWindow[]>([]);
   const [status, setStatus] = useState('Connecting… (stream runs ~10s behind live)');
   const [active, setActive] = useState<Decision[]>([]);
+  const [sceneAt, setSceneAt] = useState(0);
+
+  function formatScene(sec: number): string {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
 
   useEffect(() => {
     const video = videoRef.current;
@@ -71,6 +78,7 @@ export function ShowPlayer() {
         const same = prev.length === now.length && prev.every((d, i) => d === now[i]);
         return same ? prev : now;
       });
+      if (now.length > 0) setSceneAt(video.currentTime);
       raf = requestAnimationFrame(tick);
     }
 
@@ -119,6 +127,7 @@ export function ShowPlayer() {
 
   const blurs = active.filter((d) => d.action === 'blur' && d.box);
   const bleeping = active.some((d) => d.action === 'bleep');
+  const whys = [...new Set(active.map((d) => d.explanation ?? d.reason))].slice(0, 2);
 
   return (
     <div>
@@ -153,6 +162,12 @@ export function ShowPlayer() {
           </div>
         ))}
       </div>
+      {whys.length > 0 && (
+        <p className="mt-2 rounded-md border border-neutral-800 bg-neutral-900/60 p-2 text-xs text-neutral-300" aria-live="polite">
+          <span className="font-semibold">Why @{formatScene(sceneAt)}: </span>
+          {whys.join(' · ')}
+        </p>
+      )}
       <p className="mt-2 text-xs text-neutral-500">
         The stream is never cut: problem words are muted in place and regions are blurred in place.
       </p>

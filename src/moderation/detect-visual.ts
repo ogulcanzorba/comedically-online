@@ -1,6 +1,6 @@
 import OpenAI from 'openai';
 import type { ModerationMode, NormBox, VisualFlag } from './types';
-import { mockVisualFlagFor } from './mock';
+import { videoBlurRules } from './rulebook';
 import { PRICING } from './cost';
 
 const SAM_MODEL = 'sam-3.1';
@@ -111,15 +111,16 @@ export async function detectVisual(
   mode: ModerationMode,
 ): Promise<{ flags: VisualFlag[]; costUsd: number }> {
   if (mode === 'mock') {
-    if (!mockVisualFlagFor(seq)) return { flags: [], costUsd: 0 };
+    // Scripted stand-ins, alternating the rulebook's video rules.
+    const slot = seq % 6;
+    const rules = videoBlurRules();
+    if ((slot !== 3 && slot !== 4) || rules.length === 0) return { flags: [], costUsd: 0 };
+    const rule = (slot === 3 ? rules[0] : rules[1]) ?? rules[0];
+    const box: NormBox =
+      slot === 3 ? { x: 0.1, y: 0.3, w: 0.22, h: 0.35 } : { x: 0.4, y: 0.08, w: 0.2, h: 0.25 };
     return {
       flags: [
-        {
-          startMs: 300,
-          endMs: 1700,
-          box: { x: 0.6, y: 0.55, w: 0.25, h: 0.3 },
-          label: 'phone screen (mock)',
-        },
+        { startMs: 300, endMs: 1700, box, label: `${rule.title} (mock)`, ruleId: rule.id },
       ],
       costUsd: 0,
     };

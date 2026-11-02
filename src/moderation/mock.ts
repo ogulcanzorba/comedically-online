@@ -1,10 +1,12 @@
 import type { TranscriptTurn } from './types';
+import { audioBleepRules } from './rulebook';
 
 /**
- * Harmless demo stand-ins. The demo never uses real explicit content:
- * an invented banned word, a fixed phone-screen box, and clean bits.
+ * Harmless demo stand-ins, driven by the rulebook file.
+ * The demo never uses real explicit content.
  */
-export const MOCK_BANNED_WORD = 'blorpt';
+export const MOCK_BANNED_WORD: string = audioBleepRules()[0]?.match ?? 'waffle';
+export const MOCK_BANNED_RULE_ID: string | undefined = audioBleepRules()[0]?.id;
 
 const FAMILY_BIT = 'My mom calls every show. She says my jokes about our family are her favorite part.';
 const CLEAN_BITS = [
@@ -28,9 +30,4 @@ export function mockTranscriptFor(seq: number): MockTranscript {
     text = CLEAN_BITS[seq % CLEAN_BITS.length];
   }
   return { text, turns: [{ startMs: 0, endMs: 2000, transcript: text }] };
-}
-
-/** Every 5th chunk carries a fake phone-screen detection. */
-export function mockVisualFlagFor(seq: number): boolean {
-  return seq % 5 === 3;
 }

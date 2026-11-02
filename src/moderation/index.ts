@@ -3,6 +3,7 @@ import type { TranscriptTurn } from './types';
 import { transcribeChunk } from './transcribe';
 import { detectVisual } from './detect-visual';
 import { judgeContext } from './judge';
+import { audioBleepRules, ruleById } from './rulebook';
 import type { SpendTracker } from './cost';
 
 export function moderationMode(): ModerationMode {
@@ -74,14 +75,19 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   try {
     const v = await detectVisual(args.video, args.seq, args.rules, mode);
     costUsd += v.costUsd;
-    decisions = v.flags.map((flag) => ({
-      action: 'blur' as const,
-      reason: `visual match "${flag.label}" per house rules`,
-      startMs: flag.startMs,
-      endMs: flag.endMs,
-      box: flag.box,
-      label: flag.label,
-    }));
+    decisions = v.flags.map((flag) => {
+      const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
+      return {
+        action: 'blur' as const,
+        reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}" per house rules`,
+        startMs: flag.startMs,
+        endMs: flag.endMs,
+        box: flag.box,
+        label: flag.label,
+        ...(flag.ruleId ? { ruleId: flag.ruleId } : {}),
+        ...(rule ? { explanation: rule.explanation } : {}),
+      };
+    });
   } catch {
     // Visual detection failed: continue with audio only.
   }
@@ -98,8 +104,16 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       judgeAction = j.verdict.action;
       judgeReason = j.verdict.reason;
       if (j.verdict.action === 'bleep') {
+        const target = (j.verdict.target ?? '').toLowerCase();
+        const rule = audioBleepRules().find((r) => r.match.toLowerCase() === target);
         for (const w of bleepWindowsForTarget(turns, j.verdict.target ?? '')) {
-          decisions.push({ action: 'bleep', reason: judgeReason, startMs: w.startMs, endMs: w.endMs });
+          decisions.push({
+            action: 'bleep',
+            reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
+            startMs: w.startMs,
+            endMs: w.endMs,
+            ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
+          });
         }
       } else if (j.verdict.action === 'warn') {
         decisions.push({ action: 'warn', reason: judgeReason });
@@ -123,9 +137,17 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
     reasonParts.push('(no speech detected)');
   }
 
+  const primary = SEVERITY.flatMap((a) => decisions.filter((d) => d.action === a))[0];
   return {
     decisions,
-    entry: { seq: args.seq, at: new Date().toISOString(), action: entryAction, reason: reasonParts.join(' ') },
+    entry: {
+      seq: args.seq,
+      at: new Date().toISOString(),
+      action: entryAction,
+      reason: reasonParts.join(' '),
+      ...(primary?.ruleId ? { ruleId: primary.ruleId } : {}),
+      ...(primary?.explanation ? { explanation: primary.explanation } : {}),
+    },
     transcriptText,
     costUsd,
     mode,

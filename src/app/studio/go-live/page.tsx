@@ -293,7 +293,15 @@ export default function StudioPage() {
               <li key={`${entry.seq}-${i}`} className="border-b border-neutral-800 pb-2 last:border-0">
                 <span className="font-mono text-xs text-neutral-500">#{entry.seq}</span>{' '}
                 <span className="font-semibold text-amber-200">{entry.action}</span>
-                <span className="text-neutral-400"> — {entry.reason}</span>
+                {entry.ruleId && (
+                  <span className="ml-1 rounded bg-neutral-800 px-1.5 py-0.5 font-mono text-[11px] text-spotlight">
+                    {entry.ruleId}
+                  </span>
+                )}
+                <span className="block text-neutral-400">— {entry.reason}</span>
+                {entry.explanation && (
+                  <span className="block text-xs text-neutral-500">Why: {entry.explanation}</span>
+                )}
               </li>
             ))}
           </ul>
