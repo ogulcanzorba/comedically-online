@@ -5,6 +5,7 @@ import { listShows } from '@/db/shows';
 import { countByTier, salesByComedian } from '@/db/tickets';
 import { formatCents, showStatus } from '@/lib/datetime';
 import { LocalTime } from '@/components/LocalTime';
+import { StudioTools } from '@/components/StudioTools';
 
 export const dynamic = 'force-dynamic';
 
@@ -17,26 +18,21 @@ export default async function StudioDashboard() {
   const user = await getSessionUser();
   if (!user) redirect('/login?next=/studio');
   if (user.role !== 'comedian') {
+    // The studio layout already gates viewers; this is defense in depth.
     return (
       <main className="mx-auto max-w-3xl px-6 py-8">
         <h1 className="font-serif text-3xl">403 — Comedians only</h1>
         <p className="mt-2 text-neutral-400">
-          The studio is where comedians run their shows. Your account is a viewer account.
-        </p>
-        <div className="mt-4 flex flex-wrap gap-3">
-          <Link
-            href="/register"
-            className="rounded-md bg-amber-300 px-5 py-2.5 font-semibold text-neutral-950 hover:bg-amber-200"
-          >
+          The studio is where comedians run their shows.{' '}
+          <Link href="/register" className="underline">
             Register as comedian
+          </Link>{' '}
+          or{' '}
+          <Link href="/" className="underline">
+            browse shows
           </Link>
-          <Link
-            href="/"
-            className="rounded-md border border-neutral-600 px-5 py-2.5 hover:border-neutral-400"
-          >
-            Browse shows
-          </Link>
-        </div>
+          .
+        </p>
       </main>
     );
   }
@@ -68,7 +64,14 @@ export default async function StudioDashboard() {
         </span>
       </div>
 
-      <section aria-label="Revenue summary" className="mt-6 grid gap-3 sm:grid-cols-3">
+      <section id="tools" aria-label="Tools" className="mt-8 scroll-mt-20">
+        <h2 className="font-serif text-2xl">Tools</h2>
+        <div className="mt-3">
+          <StudioTools />
+        </div>
+      </section>
+
+      <section aria-label="Revenue summary" className="mt-8 grid gap-3 sm:grid-cols-3">
         {[
           { label: 'Shows', value: String(shows.length) },
           { label: 'Tickets sold (mock)', value: String(sales.sold) },
@@ -102,6 +105,12 @@ export default async function StudioDashboard() {
                     <LocalTime utc={show.starts_at_utc} /> · {sold} tickets
                   </p>
                 </div>
+                <Link
+                  href={`/studio/shows/${show.id}/prepare`}
+                  className="rounded-md bg-spotlight px-4 py-2 text-sm font-semibold text-ink hover:brightness-110"
+                >
+                  Prepare live show
+                </Link>
                 <Link href={`/shows/${show.slug}`} className="text-sm text-neutral-300 underline">
                   View
                 </Link>
@@ -111,30 +120,6 @@ export default async function StudioDashboard() {
               </li>
             );
           })}
-        </ul>
-      </section>
-
-      <section aria-label="Tools" className="mt-8 rounded-md border border-neutral-800 bg-neutral-900/60 p-5">
-        <h2 className="font-serif text-xl">Tools</h2>
-        <ul className="mt-2 space-y-1.5 text-sm">
-          <li>
-            <Link href="/studio/shows" className="underline">
-              Show manager
-            </Link>{' '}
-            <span className="text-neutral-500">— create, edit, and track every show.</span>
-          </li>
-          <li>
-            <Link href="/studio/shows/new#revenue-calculator" className="underline">
-              Revenue calculator
-            </Link>{' '}
-            <span className="text-neutral-500">— payouts at 25–250 tickets plus a suggested price range.</span>
-          </li>
-          <li>
-            <Link href="/studio/go-live" className="underline">
-              Live studio
-            </Link>{' '}
-            <span className="text-neutral-500">— webcam, house rules, and the moderation log.</span>
-          </li>
         </ul>
       </section>
     </main>
