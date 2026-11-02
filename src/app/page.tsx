@@ -5,6 +5,7 @@ import { countByTier } from '@/db/tickets';
 import { CATEGORIES } from '@/data/categories';
 import { ShowCard } from '@/components/ShowCard';
 import { JsonLd, siteUrl } from '@/components/JsonLd';
+import { getSessionUser } from '@/auth/get-session';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +22,7 @@ export default async function HomePage({
   const category = params.category ?? '';
   const q = (params.q ?? '').trim();
   const shows = listShows({ category: category || undefined, q: q || undefined });
+  const user = await getSessionUser();
 
   const base = siteUrl();
   return (
@@ -67,20 +69,60 @@ export default async function HomePage({
           One stage per show, ten seconds of broadcast delay. Pick a show, grab a (mock) ticket,
           and watch the jokes land.
         </p>
-        <div className="mt-6 flex flex-wrap gap-3">
-          <Link
-            href="/shows/demo-night"
-            className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
-          >
-            Watch Demo Night free
-          </Link>
-          <Link
-            href="/register"
-            className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
-          >
-            Go live as a comedian
-          </Link>
-        </div>
+        {user?.role === 'comedian' ? (
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link
+              href="/studio"
+              className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
+            >
+              Open your Studio
+            </Link>
+            <Link
+              href="/studio/shows"
+              className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
+            >
+              Prepare a live show
+            </Link>
+          </div>
+        ) : user ? (
+          <div className="mt-6">
+            <div className="flex flex-wrap gap-3">
+              <Link
+                href="/shows/demo-night"
+                className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
+              >
+                Watch Demo Night free
+              </Link>
+              <Link
+                href="#shows"
+                className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
+              >
+                Browse shows
+              </Link>
+            </div>
+            <p className="mt-3 text-sm text-neutral-500">
+              Funny yourself?{' '}
+              <Link href="/register" className="underline hover:text-neutral-300">
+                Become a comedian
+              </Link>
+            </p>
+          </div>
+        ) : (
+          <div className="mt-6 flex flex-wrap gap-3">
+            <Link
+              href="/shows/demo-night"
+              className="rounded-md bg-amber-300 px-6 py-3 font-semibold text-neutral-950 hover:bg-amber-200"
+            >
+              Watch Demo Night free
+            </Link>
+            <Link
+              href="/register"
+              className="rounded-md border border-neutral-600 px-6 py-3 font-semibold text-neutral-100 hover:border-neutral-400"
+            >
+              Go live as a comedian
+            </Link>
+          </div>
+        )}
 
         <form method="GET" className="mt-12 flex flex-wrap gap-3" role="search">
           <label className="sr-only" htmlFor="q">
@@ -114,7 +156,7 @@ export default async function HomePage({
           </button>
         </form>
 
-        <section aria-label="Shows" className="mt-6 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <section id="shows" aria-label="Shows" className="mt-6 grid scroll-mt-20 gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {shows.map((show) => (
             <ShowCard
               key={show.id}

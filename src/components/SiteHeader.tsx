@@ -24,7 +24,7 @@ export async function SiteHeader() {
               <Link href="/studio/shows" className="text-neutral-300 hover:text-white">
                 My shows
               </Link>
-              <Link href="/studio/go-live" className="text-neutral-300 hover:text-white">
+              <Link href="/studio" className="text-neutral-300 hover:text-white">
                 Go live
               </Link>
             </>
