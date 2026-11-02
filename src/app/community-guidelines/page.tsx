@@ -23,10 +23,11 @@ export default function GuidelinesPage() {
         <li>Showing private information on screen (addresses, IDs, other people&apos;s messages).</li>
         <li>Hate symbols, extremist propaganda, or encouragement of self-harm.</li>
       </ul>
-      <h2>3. House rules matter</h2>
+      <h2>3. One rulebook for everyone</h2>
       <p>
-        Comedians set plain-language house rules per show (“bleep my ex&apos;s name”). The moderator
-        follows them on top of these baseline guidelines.
+        Moderation follows a single developer-maintained rulebook that every comedian accepts before
+        going live. Nobody can add, edit, or override its rules — the moderator enforces them on top
+        of these baseline guidelines.
       </p>
       <h2>4. Enforcement</h2>
       <p>

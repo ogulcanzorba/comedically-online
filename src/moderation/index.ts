@@ -14,7 +14,6 @@ export interface ModerateArgs {
   seq: number;
   video: Buffer | null;
   wav: Buffer | null;
-  rules: string[];
   recentTranscript: string;
   tracker: SpendTracker;
 }
@@ -73,13 +72,13 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
 
   let decisions: Decision[] = [];
   try {
-    const v = await detectVisual(args.video, args.seq, args.rules, mode);
+    const v = await detectVisual(args.video, args.seq, mode);
     costUsd += v.costUsd;
     decisions = v.flags.map((flag) => {
       const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
       return {
         action: 'blur' as const,
-        reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}" per house rules`,
+        reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`,
         startMs: flag.startMs,
         endMs: flag.endMs,
         box: flag.box,
@@ -97,7 +96,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   if (transcriptText.trim().length > 0) {
     try {
       const j = await judgeContext(
-        { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText, rules: args.rules },
+        { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText },
         mode,
       );
       costUsd += j.costUsd;

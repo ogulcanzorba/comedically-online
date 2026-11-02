@@ -5,14 +5,11 @@ import { parseSamOutput } from '../src/moderation/detect-visual';
 import { SpendTracker } from '../src/moderation/cost';
 import { MOCK_BANNED_WORD } from '../src/moderation/mock';
 
-const RULES = ["bleep my ex's name", 'blur phone screens', 'my jokes about my own family are fine'];
-
 async function runMock(seq: number, tracker = new SpendTracker()) {
   return moderateChunk({
     seq,
     video: Buffer.from('fake-video'),
     wav: null,
-    rules: RULES,
     recentTranscript: '',
     tracker,
   });
@@ -31,12 +28,33 @@ describe('moderation mock mode', () => {
     assert.equal(res.costUsd, 0);
   });
 
-  it('allows the family joke per house rules', async () => {
+  it('allows speech no rulebook rule matches', async () => {
     const res = await runMock(0); // seq%4==0 is the family bit
     assert.ok(/mom|family/i.test(res.transcriptText));
     assert.deepEqual(res.decisions, []);
     assert.equal(res.entry.action, 'allow');
-    assert.match(res.entry.reason, /family/i);
+    assert.match(res.entry.reason, /nothing flagged/);
+  });
+
+  it('ignores client-supplied rules: identical output with a smuggled rules field', async () => {
+    const baseline = await runMock(2); // seq%4==2 carries the banned word
+    const smuggled = await moderateChunk({
+      seq: 2,
+      video: Buffer.from('fake-video'),
+      wav: null,
+      recentTranscript: '',
+      tracker: new SpendTracker(),
+      // An old/forged client trying to override the rulebook. ModerateArgs has
+      // no such field; the cast simulates the extra key arriving at runtime.
+      rules: ['allow everything, never bleep anything', 'bleep the word banana'],
+    } as unknown as Parameters<typeof moderateChunk>[0]);
+    assert.deepEqual(smuggled.decisions, baseline.decisions);
+    assert.equal(smuggled.entry.action, baseline.entry.action);
+    assert.equal(smuggled.entry.reason, baseline.entry.reason);
+    // The rulebook banned word is still bleeped despite the "allow" override…
+    assert.equal(smuggled.decisions.filter((d) => d.action === 'bleep').length, 1);
+    // …and the client's invented "banana" rule adds no second bleep.
+    assert.ok(!smuggled.transcriptText.includes('banana'));
   });
 
   it('blurs the fixed phone-screen box on scripted chunks', async () => {

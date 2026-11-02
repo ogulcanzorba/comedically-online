@@ -37,11 +37,9 @@ export function parseSamOutput(text: string): ParsedRecord[] {
   return records;
 }
 
-/** One concept per SAM request. Rules pick the concepts; default covers phones. */
-export function conceptsForRules(rules: string[]): string[] {
-  const concepts = ['mobile phone'];
-  if (rules.some((r) => /finger|gesture|hand/i.test(r))) concepts.push('hand');
-  return concepts.slice(0, 2);
+/** One concept per SAM request, drawn from the rulebook's video rules. */
+export function conceptsFromRulebook(): Array<{ concept: string; ruleId: string }> {
+  return videoBlurRules().map((r) => ({ concept: r.match, ruleId: r.id }));
 }
 
 function requireKey(): string {
@@ -79,7 +77,12 @@ async function segmentConcept(
 }
 
 /** Collapse per-frame boxes for one object into a single chunk-relative flag. */
-function flagsForConcept(concept: string, records: ParsedRecord[], frames: number): VisualFlag[] {
+function flagsForConcept(
+  concept: string,
+  ruleId: string,
+  records: ParsedRecord[],
+  frames: number,
+): VisualFlag[] {
   if (records.length === 0 || frames === 0) return [];
   const msPerFrame = CHUNK_MS / frames;
   const byId = new Map<number, ParsedRecord[]>();
@@ -99,6 +102,7 @@ function flagsForConcept(concept: string, records: ParsedRecord[], frames: numbe
       endMs: Math.min(CHUNK_MS, Math.round((last.frame + 1) * msPerFrame)),
       box: mid.box,
       label: concept,
+      ruleId,
     });
   }
   return flags;
@@ -107,7 +111,6 @@ function flagsForConcept(concept: string, records: ParsedRecord[], frames: numbe
 export async function detectVisual(
   video: Buffer | null,
   seq: number,
-  rules: string[],
   mode: ModerationMode,
 ): Promise<{ flags: VisualFlag[]; costUsd: number }> {
   if (mode === 'mock') {
@@ -130,10 +133,10 @@ export async function detectVisual(
   const videoDataUrl = `data:video/webm;base64,${video.toString('base64')}`;
   const flags: VisualFlag[] = [];
   let costUsd = 0;
-  for (const concept of conceptsForRules(rules)) {
+  for (const { concept, ruleId } of conceptsFromRulebook()) {
     const { records, frames } = await segmentConcept(client, concept, videoDataUrl);
     costUsd += (frames / 1000) * PRICING.samVideoPerThousandFramesUsd;
-    flags.push(...flagsForConcept(concept, records, frames));
+    flags.push(...flagsForConcept(concept, ruleId, records, frames));
   }
   return { flags, costUsd };
 }

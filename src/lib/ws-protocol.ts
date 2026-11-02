@@ -4,7 +4,11 @@ export const WS_PATH = '/ws';
 
 export type ClientRole = 'publisher' | 'viewer';
 
-/** Publisher -> server: moderation rules in plain language. */
+/**
+ * Publisher -> server: legacy free-text moderation rules.
+ * @deprecated Rules come only from the platform rulebook now. The server
+ * accepts this message for backward compatibility but ignores its contents.
+ */
 export interface RulesMessage {
   type: 'rules';
   rules: string[];

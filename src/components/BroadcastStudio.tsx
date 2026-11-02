@@ -2,8 +2,6 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-const DEFAULT_RULES = `bleep my ex's name\nblur phone screens\nmy jokes about my own family are fine`;
-
 /** AudioWorklet processor: forwards mic samples to the main thread. */
 const WORKLET_CODE = `
 class Capture extends AudioWorkletProcessor {
@@ -75,7 +73,6 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const liveSinceRef = useRef(0);
   const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
   const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'ended'>('idle');
-  const [rules, setRules] = useState(DEFAULT_RULES);
   const [error, setError] = useState('');
   const [needsAcceptance, setNeedsAcceptance] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -115,16 +112,6 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     }, 1000);
     return () => window.clearInterval(id);
   }, [status]);
-
-  function sendRules(ws: WebSocket, value: string): void {
-    const lines = value
-      .split('\n')
-      .map((l) => l.trim())
-      .filter(Boolean);
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'rules', rules: lines }));
-    }
-  }
 
   /** Start parallel WAV capture for transcription. Failure is non-fatal (mock still works). */
   async function startAudioCapture(stream: MediaStream): Promise<void> {
@@ -211,7 +198,6 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         ws.onopen = () => resolve();
         ws.onerror = () => reject(new Error('websocket'));
       });
-      sendRules(ws, rules);
       seqRef.current = 0;
       await startAudioCapture(stream);
       const mimeType =
@@ -311,24 +297,10 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         )}
       </div>
 
-      <div className="mt-4">
-        <h3 className="text-sm font-semibold text-neutral-300">
-          House rules for the moderator (plain language)
-        </h3>
-        <textarea
-          value={rules}
-          onChange={(e) => setRules(e.target.value)}
-          rows={3}
-          aria-label="House rules for the moderator"
-          className="mt-2 w-full rounded-md border border-neutral-700 bg-neutral-900 p-3 text-sm"
-        />
-        <button
-          onClick={() => wsRef.current && sendRules(wsRef.current, rules)}
-          className="mt-2 rounded-md border border-neutral-600 px-4 py-1.5 text-sm hover:border-neutral-400"
-        >
-          Update rules
-        </button>
-      </div>
+      <p className="mt-4 text-sm text-neutral-500">
+        Moderation follows the platform rulebook you accepted above — there is nothing to configure
+        here.
+      </p>
     </div>
   );
 }

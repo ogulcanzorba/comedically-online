@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import type { ModerationAction, ModerationMode } from './types';
 import { MOCK_BANNED_RULE_ID, MOCK_BANNED_WORD } from './mock';
+import { RULEBOOK_RULES } from './rulebook';
 import { PRICING } from './cost';
 
 const SPARK_MODEL = 'muse-spark-1.3';
@@ -8,7 +9,6 @@ const SPARK_MODEL = 'muse-spark-1.3';
 export interface JudgeInput {
   recentTranscript: string;
   chunkTranscript: string;
-  rules: string[];
 }
 
 export interface JudgeVerdict {
@@ -35,9 +35,6 @@ function mockJudge(input: JudgeInput): JudgeVerdict {
       target: MOCK_BANNED_WORD,
     };
   }
-  if (/\b(mom|dad|mother|father|family|brother|sister)\b/i.test(input.chunkTranscript)) {
-    return { action: 'allow', reason: 'mock: family joke allowed by house rules' };
-  }
   return { action: 'allow', reason: 'mock: nothing flagged' };
 }
 
@@ -58,7 +55,7 @@ async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; co
         content: [
           'You are the comedy-aware moderation judge for Comedically Online, a stand-up streaming stage.',
           'Decide if flagged speech is a joke/satire/self-deprecation (allow) or a real attack on a person or group (bleep).',
-          'Always follow the comedian\u2019s own house rules: they can be stricter than default.',
+          'Enforce ONLY the platform rulebook below: bleep speech matching an audio/text rule, allow everything else. There are no comedian-supplied rules.',
           'Actions: allow | bleep (one spoken word/phrase) | warn (borderline whole chunk). Never choose blur (visuals are separate).',
           'Reply with JSON only: {"action":"allow|bleep|warn","reason":"<=140 chars","target":"exact offending word or phrase, bleep only"}.',
           'Omit target unless action is bleep. target must appear verbatim in the chunk transcript.',
@@ -67,7 +64,12 @@ async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; co
       {
         role: 'user',
         content: JSON.stringify({
-          houseRules: input.rules,
+          rulebook: RULEBOOK_RULES.filter((r) => r.modality !== 'video').map((r) => ({
+            id: r.id,
+            match: r.match,
+            action: r.action,
+            description: r.description,
+          })),
           recentTranscript: input.recentTranscript.slice(-2000),
           chunkTranscript: input.chunkTranscript,
         }),

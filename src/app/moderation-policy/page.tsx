@@ -12,7 +12,7 @@ export default function ModerationPage() {
       <h2>1. What the AI does</h2>
       <ul>
         <li>Transcribes each 2-second chunk and watches the video for rule-relevant visuals.</li>
-        <li>Applies the comedian&apos;s own house rules plus the community guidelines.</li>
+        <li>Applies the platform rulebook plus the community guidelines. Comedians cannot add or override rules.</li>
         <li>Takes minimal action: mute the offending word, blur the offending region. Never cuts the stream.</li>
         <li>Logs every decision with a short reason the comedian can see live.</li>
       </ul>

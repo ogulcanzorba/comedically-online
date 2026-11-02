@@ -39,7 +39,6 @@ export class StreamHost {
   private readonly viewers = new Set<WebSocket>();
   private readonly startedViewers = new Set<WebSocket>();
   private publisher: WebSocket | null = null;
-  private rules: string[] = [];
   private readonly log: ModerationLogEntry[] = [];
   private readonly transcriptWindow: Array<{ atMs: number; text: string }> = [];
   private readonly tracker = new SpendTracker();
@@ -137,10 +136,10 @@ export class StreamHost {
       return;
     }
     if (!msg || typeof msg.type !== 'string') return;
-    if (msg.type === 'rules' && Array.isArray((msg as RulesMessage).rules)) {
-      const rules = (msg as RulesMessage).rules;
-      this.rules = rules.filter((r): r is string => typeof r === 'string').slice(0, 20);
-      this.pushLog({ seq: -1, at: new Date().toISOString(), action: 'allow', reason: `rules updated (${this.rules.length})` });
+    if (msg.type === 'rules') {
+      // Legacy clients may still send free-text rules; they are ignored.
+      // Moderation follows only the platform rulebook. No log entry: an
+      // ignored message must not look like an applied rule change.
       return;
     }
     if (msg.type === 'media') {
@@ -194,7 +193,6 @@ export class StreamHost {
       seq,
       video,
       wav,
-      rules: this.rules,
       recentTranscript: this.recentTranscript(),
       tracker: this.tracker,
     })
