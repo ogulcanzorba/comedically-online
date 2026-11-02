@@ -10,7 +10,7 @@ import type { TranscriptTurn } from './types';
 import { transcribeChunk } from './transcribe';
 import { detectVisual } from './detect-visual';
 import { judgeContext } from './judge';
-import { audioRuleForTarget, ruleById } from './rulebook';
+import { audioRuleForTarget, audioRulesMatching, ruleById } from './rulebook';
 import type { SpendTracker } from './cost';
 
 export function moderationMode(): ModerationMode {
@@ -23,6 +23,8 @@ export interface ModerateArgs {
   wav: Buffer | null;
   recentTranscript: string;
   tracker: SpendTracker;
+  /** Server receipt time (Date.now()) for queue-wait measurement. Omit when unknown. */
+  receivedAtMs?: number;
 }
 
 export interface ModerationResult {
@@ -88,6 +90,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   const mode: ModerationMode = args.tracker.capped ? 'mock' : requested;
   const fellBack = mode !== requested;
   let costUsd = 0;
+  const queueMs = args.receivedAtMs ? Math.max(0, Date.now() - args.receivedAtMs) : 0;
 
   // Transcription and visual detection run concurrently; the judge still needs
   // the transcript, so it runs after. Each stage fails independently, keeping
@@ -181,36 +184,43 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   let judgeAction: ModerationAction = 'allow';
   let judgeMs = 0;
   let judgeError: string | null = null;
+  let judgeSkipped = false;
   if (transcriptText.trim().length > 0) {
-    const judgeStart = Date.now();
-    try {
-      const j = await judgeContext(
-        { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText },
-        mode,
-      );
-      judgeMs = Date.now() - judgeStart;
-      costUsd += j.costUsd;
-      judgeAction = j.verdict.action;
-      judgeReason = j.verdict.reason;
-      if (j.verdict.action === 'bleep') {
-        const rule = audioRuleForTarget(j.verdict.target ?? '');
-        for (const w of bleepWindowsForTarget(turns, j.verdict.target ?? '')) {
-          decisions.push({
-            action: 'bleep',
-            reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
-            startMs: w.startMs,
-            endMs: w.endMs,
-            ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
-          });
+    // The judge only acts on rulebook matches, so a transcript with no rule
+    // candidate needs no call at all (saves ~7s and the Spark tokens).
+    if (audioRulesMatching(transcriptText).length === 0) {
+      judgeSkipped = true;
+    } else {
+      const judgeStart = Date.now();
+      try {
+        const j = await judgeContext(
+          { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText },
+          mode,
+        );
+        judgeMs = Date.now() - judgeStart;
+        costUsd += j.costUsd;
+        judgeAction = j.verdict.action;
+        judgeReason = j.verdict.reason;
+        if (j.verdict.action === 'bleep') {
+          const rule = audioRuleForTarget(j.verdict.target ?? '');
+          for (const w of bleepWindowsForTarget(turns, j.verdict.target ?? '')) {
+            decisions.push({
+              action: 'bleep',
+              reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
+              startMs: w.startMs,
+              endMs: w.endMs,
+              ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
+            });
+          }
+        } else if (j.verdict.action === 'warn') {
+          decisions.push({ action: 'warn', reason: judgeReason });
         }
-      } else if (j.verdict.action === 'warn') {
-        decisions.push({ action: 'warn', reason: judgeReason });
+      } catch (e) {
+        judgeMs = Date.now() - judgeStart;
+        judgeError = errorDetail(e);
+        judgeAction = 'allow';
+        judgeReason = 'judge unavailable; released after delay';
       }
-    } catch (e) {
-      judgeMs = Date.now() - judgeStart;
-      judgeError = errorDetail(e);
-      judgeAction = 'allow';
-      judgeReason = 'judge unavailable; released after delay';
     }
   }
 
@@ -263,7 +273,8 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       transcript: transcriptText,
       language: tx.language,
       matchedRule: primary?.ruleId ?? null,
-      timingsMs: { voiceMs: tx.ms, samMs: det.ms, judgeMs },
+      judgeSkipped,
+      timingsMs: { queueMs, voiceMs: tx.ms, samMs: det.ms, judgeMs },
       errors,
     },
   };

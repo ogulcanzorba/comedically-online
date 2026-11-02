@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import type { WebSocket } from 'ws';
-import { StreamHost } from '../src/server/stream-host';
+import { DEFAULT_MAX_OVERDUE_MS, StreamHost, maxHoldMs } from '../src/server/stream-host';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -29,6 +29,24 @@ async function capture(fn: () => Promise<void>): Promise<string[]> {
   }
   return lines;
 }
+
+describe('maxHoldMs', () => {
+  it('defaults to 4000ms past the delay and honors MAX_HOLD_MS', () => {
+    assert.equal(DEFAULT_MAX_OVERDUE_MS, 4000);
+    const saved = process.env.MAX_HOLD_MS;
+    delete process.env.MAX_HOLD_MS;
+    try {
+      assert.equal(maxHoldMs(), 4000);
+      process.env.MAX_HOLD_MS = '8000';
+      assert.equal(maxHoldMs(), 8000);
+      process.env.MAX_HOLD_MS = 'junk';
+      assert.equal(maxHoldMs(), 4000);
+    } finally {
+      if (saved === undefined) delete process.env.MAX_HOLD_MS;
+      else process.env.MAX_HOLD_MS = saved;
+    }
+  });
+});
 
 describe('per-chunk lifecycle log', () => {
   it('logs received, moderated, and released seqs for every chunk', async () => {
@@ -59,7 +77,8 @@ describe('per-chunk lifecycle log', () => {
     assert.ok(tx.includes('0') && tx.includes('1'), `release lines cover both seqs: ${tx}`);
   });
 
-  it('logs force-releases and late completions instead of going silent', async () => {
+  it('force-releases visibly and skips moderation that arrives after the hold', async () => {
+    const viewerSent: unknown[] = [];
     const lines = await capture(async () => {
       const host = new StreamHost({ delayMs: 20, tickMs: 5, audioWaitMs: 60_000, maxOverdueMs: 30 });
       try {
@@ -67,9 +86,10 @@ describe('per-chunk lifecycle log', () => {
         host.handleConnection(pub, 'publisher');
         pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
         pub.emit('message', Buffer.from('webm-orphan'), true);
+        host.handleConnection(fakeSocket(viewerSent), 'viewer');
         await sleep(150); // past delay + maxOverdue: force-released without moderation
         pub.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq: 0 }), false);
-        pub.emit('message', Buffer.from('wav-late'), true); // moderation now completes late
+        pub.emit('message', Buffer.from('wav-late'), true); // moderation would start now: skipped
         await sleep(150);
       } finally {
         host.close();
@@ -80,8 +100,16 @@ describe('per-chunk lifecycle log', () => {
       'force-release console line',
     );
     assert.ok(
-      lines.some((l) => l.startsWith('[debug] chunk #0 LATE')),
-      'late completion debug line',
+      !lines.some((l) => l.startsWith('[debug] chunk #0')),
+      'no moderation ran after the hold, so no debug line and no wasted model calls',
+    );
+    const metas = viewerSent
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as { type: string; init?: boolean; decisions?: Array<{ action: string }> });
+    const released = metas.find((m) => m.type === 'chunk' && m.init === false);
+    assert.deepEqual(
+      released?.decisions?.map((d) => d.action).sort(),
+      ['bleep', 'blur'],
     );
   });
 });

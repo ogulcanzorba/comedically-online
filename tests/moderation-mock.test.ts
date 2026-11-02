@@ -36,6 +36,31 @@ describe('moderation mock mode', () => {
     assert.match(res.entry.reason, /nothing flagged/);
   });
 
+  it('skips the judge when the transcript holds no rule candidate', async () => {
+    const clean = await runMock(1); // seq%4==1 is a clean bit with speech
+    assert.ok(clean.transcriptText.trim().length > 0);
+    assert.equal(clean.debug.judgeSkipped, true);
+    assert.equal(clean.debug.timingsMs.judgeMs, 0);
+    assert.equal(clean.entry.action, 'allow');
+    const flagged = await runMock(2); // banned word: judge must run
+    assert.equal(flagged.debug.judgeSkipped, false);
+    assert.equal(flagged.debug.matchedRule, 'banned-word-waffle');
+  });
+
+  it('measures queue wait from server receipt', async () => {
+    const res = await moderateChunk({
+      seq: 1,
+      video: Buffer.from('fake-video'),
+      wav: null,
+      recentTranscript: '',
+      tracker: new SpendTracker(),
+      receivedAtMs: Date.now() - 150,
+    });
+    assert.ok(res.debug.timingsMs.queueMs >= 100, `queueMs=${res.debug.timingsMs.queueMs}`);
+    const unknown = await runMock(1);
+    assert.equal(unknown.debug.timingsMs.queueMs, 0);
+  });
+
   it('ignores client-supplied rules: identical output with a smuggled rules field', async () => {
     const baseline = await runMock(2); // seq%4==2 carries the banned word
     const smuggled = await moderateChunk({

@@ -1,5 +1,6 @@
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
+import { Semaphore } from '../lib/semaphore';
 import { moderateChunk, moderationMode } from '../moderation/index';
 import { preassembleChunk } from '../moderation/transcode';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
@@ -19,10 +20,21 @@ export interface StreamHostOptions {
   audioWaitMs?: number;
   /** Past delayMs + maxOverdueMs, an unmoderated chunk is released censored. */
   maxOverdueMs?: number;
+  /** Max chunks moderating at once (bounded pool; release order stays by seq). */
+  maxConcurrent?: number;
 }
 
 /** Max hold past the playback delay before a chunk is released censored. */
 export const DEFAULT_MAX_OVERDUE_MS = 4_000;
+
+/** Overridable via MAX_HOLD_MS (ms past the delay). */
+export function maxHoldMs(): number {
+  const raw = Number(process.env.MAX_HOLD_MS ?? DEFAULT_MAX_OVERDUE_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_MAX_OVERDUE_MS;
+}
+
+/** Default moderation pool size. */
+export const DEFAULT_MAX_CONCURRENT = 4;
 
 interface PendingMedia {
   webm: { data: Buffer; receiptTimeMs: number } | null;
@@ -59,12 +71,16 @@ export class StreamHost {
   private readonly pendingMedia = new Map<number, PendingMedia>();
   private readonly audioWaitMs: number;
   private readonly maxOverdueMs: number;
+  private readonly pool: Semaphore;
+  private readonly poolMax: number;
   private readonly timer: NodeJS.Timeout;
 
   constructor(opts: StreamHostOptions = {}) {
     this.buffer = new DelayBuffer<Buffer>(opts.delayMs);
     this.audioWaitMs = opts.audioWaitMs ?? 750;
-    this.maxOverdueMs = opts.maxOverdueMs ?? DEFAULT_MAX_OVERDUE_MS;
+    this.maxOverdueMs = opts.maxOverdueMs ?? maxHoldMs();
+    this.poolMax = opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    this.pool = new Semaphore(this.poolMax);
     this.timer = setInterval(() => {
       this.flush();
     }, opts.tickMs ?? 250);
@@ -210,73 +226,94 @@ export class StreamHost {
     this.pendingMedia.delete(studioSeq);
     this.startedStudio.add(studioSeq);
     const seq = pending.serverSeq;
-    console.log(`[mod] start server=${seq} (studio=${studioSeq}, wav=${pending.wav ? 'yes' : 'no'})`);
     // Detection input must be a standalone clip: later chunks are bare
     // clusters, so the retained init segment is prepended before transcoding.
     // Playback still uses the original WebM bytes from the delay buffer.
     const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
-    moderateChunk({
-      seq,
-      video,
-      wav,
-      recentTranscript: this.recentTranscript(),
-      tracker: this.tracker,
-    })
-      .then((res) => {
-        if (this.forceReleased.has(seq)) {
-          // Already released censored by max hold: keep the transcript for
-          // judge context but don't overwrite the decisions or the log.
-          // Still print the debug line (marked late) so no chunk vanishes silently.
-          this.forceReleased.delete(seq);
+    const receiptTimeMs = pending.webm.receiptTimeMs;
+    const recentTranscript = this.recentTranscript();
+    // Bounded pool: at most poolMax chunks moderate at once, so a pileup
+    // queues instead of stampeding the model APIs. Release order still
+    // follows seq (DelayBuffer FIFO + head-of-line gate).
+    void this.pool.acquire().then((release) => {
+      const queueWaitMs = Date.now() - receiptTimeMs;
+      console.log(
+        `[mod] start server=${seq} (studio=${studioSeq}, wav=${wav ? 'yes' : 'no'}, ` +
+          `queue=${queueWaitMs}ms, pool=${this.pool.depth}/${this.poolMax})`,
+      );
+      if (this.forceReleased.has(seq)) {
+        // Censored by max hold while queued: skip the wasted model calls.
+        // (The [hold] line already printed and decisions are already set.)
+        release();
+        return;
+      }
+      moderateChunk({
+        seq,
+        video,
+        wav,
+        receivedAtMs: receiptTimeMs,
+        recentTranscript,
+        tracker: this.tracker,
+      })
+        .then((res) => {
+          if (this.forceReleased.has(seq)) {
+            // Already released censored by max hold: keep the transcript for
+            // judge context but don't overwrite the decisions or the log.
+            // Still print the debug line (marked late) so no chunk vanishes silently.
+            this.forceReleased.delete(seq);
+            if (res.transcriptText.trim().length > 0) {
+              this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
+            }
+            console.log(
+              `[debug] chunk #${seq} LATE (force-released earlier) lang=${res.debug.language} ` +
+                `rule=${res.debug.matchedRule ?? 'none'} voice=${res.debug.timingsMs.voiceMs}ms ` +
+                `sam=${res.debug.timingsMs.samMs}ms judge=${res.debug.timingsMs.judgeMs}ms ` +
+                `transcript=${JSON.stringify(res.debug.transcript)}`,
+            );
+            return;
+          }
+          this.decisions.set(seq, res.decisions);
+          this.chunkDebug.set(seq, res.debug);
           if (res.transcriptText.trim().length > 0) {
             this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
           }
+          this.pushLog(res.entry);
+          const hourly = projectedHourlyUsd(this.tracker.totalUsd, Date.now() - this.streamStartMs);
           console.log(
-            `[debug] chunk #${seq} LATE (force-released earlier) lang=${res.debug.language} ` +
-              `rule=${res.debug.matchedRule ?? 'none'} voice=${res.debug.timingsMs.voiceMs}ms ` +
-              `sam=${res.debug.timingsMs.samMs}ms judge=${res.debug.timingsMs.judgeMs}ms ` +
-              `transcript=${JSON.stringify(res.debug.transcript)}`,
+            `[cost] chunk #${seq} mode=${res.mode} +$${res.costUsd.toFixed(4)} ` +
+              `total=$${this.tracker.totalUsd.toFixed(4)} ~$${hourly.toFixed(2)}/h ` +
+              `(cap $${maxSpendUsd()}, ${moderationMode()})`,
           );
-          return;
-        }
-        this.decisions.set(seq, res.decisions);
-        this.chunkDebug.set(seq, res.debug);
-        if (res.transcriptText.trim().length > 0) {
-          this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
-        }
-        this.pushLog(res.entry);
-        const hourly = projectedHourlyUsd(this.tracker.totalUsd, Date.now() - this.streamStartMs);
-        console.log(
-          `[cost] chunk #${seq} mode=${res.mode} +$${res.costUsd.toFixed(4)} ` +
-            `total=$${this.tracker.totalUsd.toFixed(4)} ~$${hourly.toFixed(2)}/h ` +
-            `(cap $${maxSpendUsd()}, ${moderationMode()})`,
-        );
-        console.log(
-          `[debug] chunk #${seq} lang=${res.debug.language} rule=${res.debug.matchedRule ?? 'none'} ` +
-            `voice=${res.debug.timingsMs.voiceMs}ms sam=${res.debug.timingsMs.samMs}ms ` +
-            `judge=${res.debug.timingsMs.judgeMs}ms transcript=${JSON.stringify(res.debug.transcript)}` +
-            (Object.keys(res.debug.errors).length > 0
-              ? ` errors=${JSON.stringify(res.debug.errors)}`
-              : ''),
-        );
-      })
-      .catch(() => {
-        if (this.forceReleased.has(seq)) {
-          this.forceReleased.delete(seq);
-          return;
-        }
-        this.decisions.set(seq, []);
-        this.pushLog({
-          seq,
-          at: new Date().toISOString(),
-          action: 'warn',
-          reason: 'moderation error; released unmodified after delay',
+          const judgeShow = res.debug.judgeSkipped ? 'skipped' : `${res.debug.timingsMs.judgeMs}ms`;
+          console.log(
+            `[debug] chunk #${seq} lang=${res.debug.language} rule=${res.debug.matchedRule ?? 'none'} ` +
+              `queue=${res.debug.timingsMs.queueMs}ms voice=${res.debug.timingsMs.voiceMs}ms ` +
+              `sam=${res.debug.timingsMs.samMs}ms judge=${judgeShow} ` +
+              `transcript=${JSON.stringify(res.debug.transcript)}` +
+              (Object.keys(res.debug.errors).length > 0
+                ? ` errors=${JSON.stringify(res.debug.errors)}`
+                : ''),
+          );
+        })
+        .catch(() => {
+          if (this.forceReleased.has(seq)) {
+            this.forceReleased.delete(seq);
+            return;
+          }
+          this.decisions.set(seq, []);
+          this.pushLog({
+            seq,
+            at: new Date().toISOString(),
+            action: 'warn',
+            reason: 'moderation error; released unmodified after delay',
+          });
+        })
+        .finally(() => {
+          this.pendingModeration.delete(seq);
+          release();
         });
-      })
-      .finally(() => {
-        this.pendingModeration.delete(seq);
-      });
+    });
   }
 
   private recentTranscript(): string {
@@ -315,7 +352,8 @@ export class StreamHost {
         transcript: '',
         language: 'unknown',
         matchedRule: null,
-        timingsMs: { voiceMs: 0, samMs: 0, judgeMs: 0 },
+        timingsMs: { queueMs: nowMs - chunk.receiptTimeMs, voiceMs: 0, samMs: 0, judgeMs: 0 },
+        judgeSkipped: false,
         errors: { sam: `max hold exceeded (${this.maxOverdueMs}ms past the delay)` },
       });
       this.pushLog({ seq: chunk.seq, at: new Date().toISOString(), action: 'bleep', reason });

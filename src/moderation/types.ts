@@ -56,6 +56,8 @@ export interface ModerationLogEntry {
 
 /** Per-stage durations for one chunk (voice and sam run concurrently). */
 export interface ChunkTimings {
+  /** Receipt to moderation start (audio wait + pool queue). */
+  queueMs: number;
   voiceMs: number;
   samMs: number;
   judgeMs: number;
@@ -68,6 +70,8 @@ export interface ChunkDebug {
   language: string;
   /** Rulebook rule behind the primary decision, when one applies. */
   matchedRule: string | null;
+  /** True when the judge call was skipped (transcript held no rule candidate). */
+  judgeSkipped: boolean;
   timingsMs: ChunkTimings;
   /** Raw stage errors (sanitized, truncated, never secrets). Omitted when empty. */
   errors: { voice?: string; sam?: string; judge?: string };

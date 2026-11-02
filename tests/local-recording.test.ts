@@ -47,4 +47,10 @@ describe('localRecording store', () => {
     assert.equal(localRecording.count, 1);
     localRecording.start();
   });
+
+  it('bumps generation on every start so panels can wipe history', () => {
+    const before = localRecording.generation;
+    localRecording.start();
+    assert.equal(localRecording.generation, before + 1);
+  });
 });

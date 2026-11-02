@@ -40,6 +40,8 @@ class LocalRecordingStore {
   private listeners = new Set<() => void>();
   private _version = 0;
   status: 'idle' | 'recording' | 'ended' = 'idle';
+  /** Bumped on every start(): panels watch it to wipe the previous broadcast. */
+  generation = 0;
 
   get version(): number {
     return this._version;
@@ -77,6 +79,7 @@ class LocalRecordingStore {
     this.revokeAll();
     this.chunks = [];
     this.status = 'recording';
+    this.generation += 1;
     this.emit();
   }
 

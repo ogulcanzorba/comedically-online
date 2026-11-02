@@ -3,9 +3,9 @@
 import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 
-const DELAY_S = 15;
+const DELAY_S = 20;
 
-/** Interactive 15s delay demo: press start, watch a moment arrive "late". */
+/** Interactive 20s delay demo: press start, watch a moment arrive "late". */
 export function DelayDemo() {
   const [running, setRunning] = useState(false);
   const [left, setLeft] = useState(DELAY_S);
@@ -63,7 +63,7 @@ export function DelayDemo() {
         disabled={running}
         className="mt-4 rounded-md bg-spotlight px-5 py-2 text-sm font-semibold text-ink hover:brightness-110 disabled:opacity-50"
       >
-        {running ? 'Running…' : 'Run 15s demo'}
+        {running ? 'Running…' : 'Run 20s demo'}
       </button>
       <p className="mt-4 text-sm">
         <Link href="/shows/demo-night" className="underline">
