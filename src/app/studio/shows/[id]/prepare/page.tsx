@@ -5,6 +5,10 @@ import { getShowById } from '@/db/shows';
 import { getAcceptance } from '@/db/acceptances';
 import { RULEBOOK_RULES, RULEBOOK_VERSION, RULEBOOK_VERSION_HASH } from '@/moderation/rulebook';
 import { RulebookAccept } from '@/components/RulebookAccept';
+import { PrepareCamera } from '@/components/PrepareCamera';
+import { ShowPlayer } from '@/components/ShowPlayer';
+import { ModerationPanels } from '@/components/ModerationFeed';
+import { GoLiveButton } from '@/components/GoLiveButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,7 +36,7 @@ export default async function PreparePage({ params }: { params: Promise<{ id: st
       <p className="mt-1 text-sm text-neutral-400">
         Rehearse, accept the rulebook, then go live. Nothing here broadcasts.
       </p>
-      <div className="mt-6">
+      <div className="mt-6" id="acceptance">
         <RulebookAccept
           rules={RULEBOOK_RULES}
           version={RULEBOOK_VERSION}
@@ -40,6 +44,32 @@ export default async function PreparePage({ params }: { params: Promise<{ id: st
           accepted={acceptance ? { hash: acceptance.rulebook_hash, at: acceptance.accepted_at } : null}
         />
       </div>
+
+      <section aria-label="Rehearsal views" className="mt-8 grid gap-6 md:grid-cols-2">
+        <div>
+          <h2 className="font-serif text-xl">Self-view</h2>
+          <p className="mb-2 text-sm text-neutral-500">Your camera, right now. Nothing broadcasts from here.</p>
+          <PrepareCamera />
+        </div>
+        <div>
+          <h2 className="font-serif text-xl">Viewer view</h2>
+          <p className="mb-2 text-sm text-neutral-500">
+            What viewers see on the live relay, <strong>10s after capture</strong>. When you go live,
+            your stream appears here about 12s later (10s delay + one 2s chunk).
+          </p>
+          <ShowPlayer />
+        </div>
+      </section>
+
+      <section aria-label="Broadcast" className="mt-8 rounded-md border border-red-500/30 bg-red-500/5 p-5">
+        <h2 className="font-serif text-xl">Ready when you are</h2>
+        <p className="mb-3 mt-1 text-sm text-neutral-400">
+          Opens the broadcast studio for this show. The server re-checks your rulebook acceptance first.
+        </p>
+        <GoLiveButton showId={show.id} />
+      </section>
+
+      <ModerationPanels showSlug={show.slug} />
     </main>
   );
 }
