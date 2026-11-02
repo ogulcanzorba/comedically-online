@@ -3,6 +3,7 @@ import type { ModerationMode, NormBox, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
 import { PRICING } from './cost';
 import { samTimeoutMs, startTimeout } from './timeout';
+import { webmToMp4 } from './transcode';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
@@ -141,7 +142,10 @@ export async function detectVisual(
   }
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
   const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
-  const videoDataUrl = `data:video/webm;base64,${video.toString('base64')}`;
+  // SAM rejects WebM: each 2s window is transcoded to MP4 first. Failures
+  // throw into the pipeline's visual fail handling (closed/open).
+  const mp4 = await webmToMp4(video);
+  const videoDataUrl = `data:video/mp4;base64,${mp4.toString('base64')}`;
   // One SAM request per concept, all in flight at once.
   const settled = await Promise.all(
     conceptsFromRulebook().map(async ({ concept, ruleId }) => {

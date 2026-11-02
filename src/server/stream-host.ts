@@ -1,6 +1,7 @@
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { moderateChunk, moderationMode } from '../moderation/index';
+import { preassembleChunk } from '../moderation/transcode';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
 import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
 import type {
@@ -198,7 +199,10 @@ export class StreamHost {
     if (pending.timer) clearTimeout(pending.timer);
     this.pendingMedia.delete(studioSeq);
     const seq = pending.serverSeq;
-    const video = pending.webm.data;
+    // Detection input must be a standalone clip: later chunks are bare
+    // clusters, so the retained init segment is prepended before transcoding.
+    // Playback still uses the original WebM bytes from the delay buffer.
+    const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
     moderateChunk({
       seq,

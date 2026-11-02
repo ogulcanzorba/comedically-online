@@ -1,6 +1,9 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { chmodSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { WebSocket } from 'ws';
 import { errorDetail, moderateChunk, visualFailMode } from '../src/moderation/index';
 import { SpendTracker } from '../src/moderation/cost';
@@ -102,6 +105,45 @@ describe('VISUAL_FAIL_MODE', () => {
   });
 });
 
+describe('transcode failure', () => {
+  it('routes into visual fail handling (warn under open, no network used)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'ffail-'));
+    const shim = join(dir, 'ffmpeg-fail.sh');
+    writeFileSync(shim, '#!/bin/sh\necho \'shim: bad clip\' >&2\nexit 1\n');
+    chmodSync(shim, 0o755);
+    const prevMode = process.env.MODERATION_MODE;
+    const prevKey = process.env.MODEL_API_KEY;
+    const prevFail = process.env.VISUAL_FAIL_MODE;
+    const prevBin = process.env.FFMPEG_PATH;
+    process.env.MODERATION_MODE = 'live';
+    process.env.MODEL_API_KEY = 'fake-key-for-transcode-test';
+    process.env.VISUAL_FAIL_MODE = 'open';
+    process.env.FFMPEG_PATH = shim;
+    try {
+      const res = await moderateChunk({
+        seq: 1,
+        video: Buffer.from('untranscodable'),
+        wav: null, // null wav never touches the network, even in live mode
+        recentTranscript: '',
+        tracker: new SpendTracker(),
+      });
+      assert.deepEqual(res.decisions.map((d) => d.action), ['warn']);
+      assert.match(res.decisions[0].reason, /bad clip/);
+      assert.match(res.decisions[0].reason, /VISUAL_FAIL_MODE=open/);
+      assert.equal(res.entry.action, 'warn');
+    } finally {
+      if (prevMode === undefined) delete process.env.MODERATION_MODE;
+      else process.env.MODERATION_MODE = prevMode;
+      if (prevKey === undefined) delete process.env.MODEL_API_KEY;
+      else process.env.MODEL_API_KEY = prevKey;
+      if (prevFail === undefined) delete process.env.VISUAL_FAIL_MODE;
+      else process.env.VISUAL_FAIL_MODE = prevFail;
+      if (prevBin === undefined) delete process.env.FFMPEG_PATH;
+      else process.env.FFMPEG_PATH = prevBin;
+    }
+  });
+});
+
 describe('model timeout', () => {
   it('defaults to 8s voice, 20s sam, 8s spark', () => {
     const saved = {
@@ -141,7 +183,7 @@ describe('model timeout', () => {
   it('aborts after the configured delay', async () => {
     const t = startTimeout(20);
     assert.equal(t.signal.aborted, false);
-    await sleep(60);
+    await sleep(200); // generous margin: loaded CI runners stall timers
     assert.equal(t.signal.aborted, true);
     assert.throws(() => t.throwIfAborted('probe'), /probe timed out after 20ms/);
   });
@@ -149,7 +191,7 @@ describe('model timeout', () => {
   it('cancel prevents the abort', async () => {
     const t = startTimeout(20);
     t.cancel();
-    await sleep(60);
+    await sleep(200);
     assert.equal(t.signal.aborted, false);
   });
 });

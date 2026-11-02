@@ -65,24 +65,39 @@ export interface AudioRuleMatch {
   variant: string;
 }
 
-/** Audio bleep rules matching the transcript, including aliases. */
+/**
+ * Single-word variants match at a word START, tolerating trailing suffixes
+ * (Turkish agglutination: "vaffle" matches "vafflelar"; English plurals:
+ * "waffle" matches "waffles"). Mid-word hits ("xywaffle") do not match.
+ * Multi-word variants fall back to substring matching.
+ */
+function variantMatches(words: string[], joined: string, variant: string): boolean {
+  const norm = normalizeForMatch(variant);
+  if (!norm) return false;
+  if (!norm.includes(' ')) return words.some((w) => w.startsWith(norm));
+  return joined.includes(norm);
+}
+
+/** Audio bleep rules matching the transcript, including aliases and suffixes. */
 export function audioRulesMatching(transcript: string): AudioRuleMatch[] {
-  const norm = normalizeForMatch(transcript);
-  if (!norm) return [];
+  const joined = normalizeForMatch(transcript);
+  const words = joined.split(' ').filter(Boolean);
+  if (words.length === 0) return [];
   const hits: AudioRuleMatch[] = [];
   for (const rule of audioBleepRules()) {
     const variant = [rule.match, ...(rule.aliases ?? [])].find((m) =>
-      norm.includes(normalizeForMatch(m)),
+      variantMatches(words, joined, m),
     );
     if (variant !== undefined) hits.push({ rule, variant });
   }
   return hits;
 }
 
-/** Find the audio rule a judge target belongs to (normalized, aliases included). */
+/** Find the audio rule a judge target belongs to (normalized, aliases, suffixes). */
 export function audioRuleForTarget(target: string): RulebookRule | undefined {
-  const norm = normalizeForMatch(target);
+  const joined = normalizeForMatch(target);
+  const words = joined.split(' ').filter(Boolean);
   return audioBleepRules().find((r) =>
-    [r.match, ...(r.aliases ?? [])].some((m) => normalizeForMatch(m) === norm),
+    [r.match, ...(r.aliases ?? [])].some((m) => variantMatches(words, joined, m)),
   );
 }

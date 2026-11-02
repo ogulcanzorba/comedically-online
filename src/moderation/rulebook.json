@@ -8,7 +8,7 @@
       "title": "No saying “waffle”",
       "description": "The word “waffle” is banned from the stage. Applies to transcribed speech (text) and the audio itself: the matching slice is muted in place.",
       "match": "waffle",
-      "aliases": ["vafıl", "vaffıl"],
+      "aliases": ["vafıl", "vaffıl", "vafil", "vaflındır", "vaffle"],
       "action": "bleep",
       "severity": "high",
       "explanation": "“Waffle” is our harmless stand-in for a banned word. Saying it mutes just that word so the joke around it survives.",

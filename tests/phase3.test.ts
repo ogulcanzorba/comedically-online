@@ -64,11 +64,14 @@ describe('rulebook loading', () => {
 
   it('matches Turkish waffle spellings via aliases', () => {
     const rule = audioBleepRules()[0];
-    assert.ok(rule.aliases?.includes('vafıl'));
-    assert.ok(rule.aliases?.includes('vaffıl'));
+    for (const alias of ['vafıl', 'vaffıl', 'vafil', 'vaflındır', 'vaffle']) {
+      assert.ok(rule.aliases?.includes(alias), `missing alias: ${alias}`);
+    }
     for (const [text, variant] of [
       ['sahnede vafıl hakkında konuştum', 'vafıl'],
       ['Vaffıl! dedim', 'vaffıl'],
+      ['bir vaflındır hikayesi', 'vaflındır'],
+      ['canım vaffle çekti', 'vaffle'],
     ] as Array<[string, string]>) {
       const hits = audioRulesMatching(text);
       assert.equal(hits.length, 1, text);
@@ -77,16 +80,25 @@ describe('rulebook loading', () => {
     }
   });
 
+  it('tolerates trailing suffixes but not mid-word hits', () => {
+    for (const text of ['vafflelar ve vafıllar', "vaffle'ı yedim", 'fresh waffles']) {
+      assert.equal(audioRulesMatching(text).length, 1, text);
+    }
+    assert.deepEqual(audioRulesMatching('xywaffle is not a word start'), []);
+  });
+
   it('resolves judge targets to rules through normalization and aliases', () => {
     assert.equal(audioRuleForTarget('Waffle!')?.id, 'banned-word-waffle');
     assert.equal(audioRuleForTarget('vafıl')?.id, 'banned-word-waffle');
+    assert.equal(audioRuleForTarget('vaffles')?.id, 'banned-word-waffle');
     assert.equal(audioRuleForTarget('pancakes'), undefined);
   });
 });
 
 describe('acceptance gate (server side)', () => {
   it('acceptance is valid only for the current revision', () => {
-    process.env.SQLITE_FILE = join(tmpdir(), `acceptance-test-${process.pid}.db`);
+    // Unique per run: PID-keyed paths collide with stale files when PIDs are reused.
+    process.env.SQLITE_FILE = join(tmpdir(), `acceptance-test-${process.pid}-${Date.now()}.db`);
     createUser({ id: 'u1', role: 'comedian', email: 'u1@example.com', passwordHash: 'x', displayName: 'U1' });
     assert.equal(hasValidAcceptance('u1', RULEBOOK_VERSION_HASH), false);
     recordAcceptance('u1', 'stale-revision');
