@@ -47,6 +47,11 @@ export class DelayBuffer<T> {
     return due;
   }
 
+  /** Copy of the queued entries in release order (for overdue inspection). */
+  snapshot(): BufferedChunk<T>[] {
+    return [...this.queue];
+  }
+
   clear(): void {
     this.queue = [];
   }

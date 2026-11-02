@@ -1,6 +1,7 @@
 import type { ModerationMode, TranscriptTurn } from './types';
 import { mockTranscriptFor } from './mock';
 import { PRICING } from './cost';
+import { startTimeout } from './timeout';
 
 const VOICE_URL = 'https://api.meta.ai/v1/asr/transcribe';
 const VOICE_MODEL = 'muse-voice-transcribe-1.0';
@@ -42,11 +43,18 @@ export async function transcribeChunk(
     }),
   );
   form.append('audio', new Blob([Uint8Array.from(wav)], { type: 'audio/wav' }), 'chunk.wav');
-  const res = await fetch(VOICE_URL, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${requireKey()}`, Accept: 'application/json' },
-    body: form,
-  });
+  const t = startTimeout();
+  let res: Response;
+  try {
+    res = await fetch(VOICE_URL, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${requireKey()}`, Accept: 'application/json' },
+      body: form,
+      signal: t.signal,
+    });
+  } finally {
+    t.cancel();
+  }
   if (!res.ok) {
     throw new Error(`voice transcribe failed: HTTP ${res.status}`);
   }

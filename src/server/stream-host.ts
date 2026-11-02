@@ -16,7 +16,12 @@ export interface StreamHostOptions {
   tickMs?: number;
   /** How long to wait for a chunk's wav before moderating without it. */
   audioWaitMs?: number;
+  /** Past delayMs + maxOverdueMs, an unmoderated chunk is released censored. */
+  maxOverdueMs?: number;
 }
+
+/** Max hold past the playback delay before a chunk is released censored. */
+export const DEFAULT_MAX_OVERDUE_MS = 4_000;
 
 interface PendingMedia {
   webm: { data: Buffer; receiptTimeMs: number } | null;
@@ -39,6 +44,7 @@ export class StreamHost {
   private readonly viewers = new Set<WebSocket>();
   private readonly startedViewers = new Set<WebSocket>();
   private publisher: WebSocket | null = null;
+  private readonly forceReleased = new Set<number>();
   private readonly log: ModerationLogEntry[] = [];
   private readonly transcriptWindow: Array<{ atMs: number; text: string }> = [];
   private readonly tracker = new SpendTracker();
@@ -48,11 +54,13 @@ export class StreamHost {
   private pendingMeta: MediaMetaMessage | null = null;
   private readonly pendingMedia = new Map<number, PendingMedia>();
   private readonly audioWaitMs: number;
+  private readonly maxOverdueMs: number;
   private readonly timer: NodeJS.Timeout;
 
   constructor(opts: StreamHostOptions = {}) {
     this.buffer = new DelayBuffer<Buffer>(opts.delayMs);
     this.audioWaitMs = opts.audioWaitMs ?? 750;
+    this.maxOverdueMs = opts.maxOverdueMs ?? DEFAULT_MAX_OVERDUE_MS;
     this.timer = setInterval(() => {
       this.flush();
     }, opts.tickMs ?? 250);
@@ -121,6 +129,7 @@ export class StreamHost {
     this.buffer.clear();
     this.decisions.clear();
     this.pendingModeration.clear();
+    this.forceReleased.clear();
     this.pendingMedia.clear();
     this.pendingMeta = null;
     this.initSegment = null;
@@ -197,6 +206,15 @@ export class StreamHost {
       tracker: this.tracker,
     })
       .then((res) => {
+        if (this.forceReleased.has(seq)) {
+          // Already released censored by max hold: keep the transcript for
+          // judge context but don't overwrite the decisions or the log.
+          this.forceReleased.delete(seq);
+          if (res.transcriptText.trim().length > 0) {
+            this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
+          }
+          return;
+        }
         this.decisions.set(seq, res.decisions);
         if (res.transcriptText.trim().length > 0) {
           this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
@@ -210,6 +228,10 @@ export class StreamHost {
         );
       })
       .catch(() => {
+        if (this.forceReleased.has(seq)) {
+          this.forceReleased.delete(seq);
+          return;
+        }
         this.decisions.set(seq, []);
         this.pushLog({
           seq,
@@ -231,8 +253,38 @@ export class StreamHost {
     return this.transcriptWindow.map((t) => t.text).join(' ');
   }
 
+  /**
+   * Max hold: a chunk still unmoderated past delay + maxOverdue is released
+   * blurred and bleeped in full instead of blocking the queue behind it.
+   */
+  private forceReleaseOverdue(nowMs: number): void {
+    for (const chunk of this.buffer.snapshot()) {
+      if (!this.pendingModeration.has(chunk.seq)) continue;
+      if (nowMs - chunk.receiptTimeMs <= this.buffer.delay + this.maxOverdueMs) continue;
+      this.pendingModeration.delete(chunk.seq);
+      this.forceReleased.add(chunk.seq);
+      const reason =
+        `moderation unavailable: unmoderated ${this.maxOverdueMs}ms past the delay; ` +
+        'released blurred and bleeped in full';
+      this.decisions.set(chunk.seq, [
+        { action: 'bleep', reason, startMs: 0, endMs: 2000 },
+        {
+          action: 'blur',
+          reason,
+          startMs: 0,
+          endMs: 2000,
+          box: { x: 0, y: 0, w: 1, h: 1 },
+          label: 'full frame (max hold exceeded)',
+        },
+      ]);
+      this.pushLog({ seq: chunk.seq, at: new Date().toISOString(), action: 'bleep', reason });
+    }
+  }
+
   private flush(): void {
-    const due = this.buffer.popDue(Date.now(), (chunk) => !this.pendingModeration.has(chunk.seq));
+    const nowMs = Date.now();
+    this.forceReleaseOverdue(nowMs);
+    const due = this.buffer.popDue(nowMs, (chunk) => !this.pendingModeration.has(chunk.seq));
     if (due.length === 0) return;
     for (const chunk of due) {
       const decisions = this.decisions.get(chunk.seq) ?? [];

@@ -3,6 +3,7 @@ import type { ModerationAction, ModerationMode } from './types';
 import { MOCK_BANNED_RULE_ID, MOCK_BANNED_WORD } from './mock';
 import { RULEBOOK_RULES } from './rulebook';
 import { PRICING } from './cost';
+import { startTimeout } from './timeout';
 
 const SPARK_MODEL = 'muse-spark-1.3';
 
@@ -46,36 +47,45 @@ function requireKey(): string {
 
 async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; costUsd: number }> {
   const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
-  const res = await client.chat.completions.create({
-    model: SPARK_MODEL,
-    response_format: { type: 'json_object' },
-    messages: [
+  const t = startTimeout();
+  let res: Awaited<ReturnType<typeof client.chat.completions.create>>;
+  try {
+    res = await client.chat.completions.create(
       {
-        role: 'system',
-        content: [
-          'You are the comedy-aware moderation judge for Comedically Online, a stand-up streaming stage.',
-          'Decide if flagged speech is a joke/satire/self-deprecation (allow) or a real attack on a person or group (bleep).',
-          'Enforce ONLY the platform rulebook below: bleep speech matching an audio/text rule, allow everything else. There are no comedian-supplied rules.',
-          'Actions: allow | bleep (one spoken word/phrase) | warn (borderline whole chunk). Never choose blur (visuals are separate).',
-          'Reply with JSON only: {"action":"allow|bleep|warn","reason":"<=140 chars","target":"exact offending word or phrase, bleep only"}.',
-          'Omit target unless action is bleep. target must appear verbatim in the chunk transcript.',
-        ].join(' '),
+        model: SPARK_MODEL,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: [
+              'You are the comedy-aware moderation judge for Comedically Online, a stand-up streaming stage.',
+              'Decide if flagged speech is a joke/satire/self-deprecation (allow) or a real attack on a person or group (bleep).',
+              'Enforce ONLY the platform rulebook below: bleep speech matching an audio/text rule, allow everything else. There are no comedian-supplied rules.',
+              'Actions: allow | bleep (one spoken word/phrase) | warn (borderline whole chunk). Never choose blur (visuals are separate).',
+              'Reply with JSON only: {"action":"allow|bleep|warn","reason":"<=140 chars","target":"exact offending word or phrase, bleep only"}.',
+              'Omit target unless action is bleep. target must appear verbatim in the chunk transcript.',
+            ].join(' '),
+          },
+          {
+            role: 'user',
+            content: JSON.stringify({
+              rulebook: RULEBOOK_RULES.filter((r) => r.modality !== 'video').map((r) => ({
+                id: r.id,
+                match: r.match,
+                action: r.action,
+                description: r.description,
+              })),
+              recentTranscript: input.recentTranscript.slice(-2000),
+              chunkTranscript: input.chunkTranscript,
+            }),
+          },
+        ],
       },
-      {
-        role: 'user',
-        content: JSON.stringify({
-          rulebook: RULEBOOK_RULES.filter((r) => r.modality !== 'video').map((r) => ({
-            id: r.id,
-            match: r.match,
-            action: r.action,
-            description: r.description,
-          })),
-          recentTranscript: input.recentTranscript.slice(-2000),
-          chunkTranscript: input.chunkTranscript,
-        }),
-      },
-    ],
-  });
+      { signal: t.signal },
+    );
+  } finally {
+    t.cancel();
+  }
   const content = res.choices[0]?.message?.content ?? '';
   const usage = res.usage;
   const costUsd = usage

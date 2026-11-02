@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import type { ModerationMode, NormBox, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
 import { PRICING } from './cost';
+import { startTimeout } from './timeout';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
@@ -53,23 +54,33 @@ async function segmentConcept(
   concept: string,
   videoDataUrl: string,
 ): Promise<{ records: ParsedRecord[]; frames: number }> {
-  const stream = client.responses.stream({
-    model: SAM_MODEL,
-    input: [
-      {
-        type: 'message',
-        role: 'user',
-        content: [
-          { type: 'input_text', text: concept },
-          { type: 'input_video', video_url: videoDataUrl },
-        ],
-      },
-    ],
-  } as unknown as Parameters<typeof client.responses.stream>[0]);
+  const t = startTimeout();
   let text = '';
-  for await (const event of stream) {
-    const ev = event as { type?: string; delta?: string };
-    if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
+  try {
+    const stream = client.responses.stream(
+      {
+        model: SAM_MODEL,
+        input: [
+          {
+            type: 'message',
+            role: 'user',
+            content: [
+              { type: 'input_text', text: concept },
+              { type: 'input_video', video_url: videoDataUrl },
+            ],
+          },
+        ],
+      } as unknown as Parameters<typeof client.responses.stream>[0],
+      { signal: t.signal },
+    );
+    for await (const event of stream) {
+      const ev = event as { type?: string; delta?: string };
+      if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
+    }
+    // Aborting a stream can end it silently; a timeout must surface as an error.
+    t.throwIfAborted('sam video');
+  } finally {
+    t.cancel();
   }
   const records = parseSamOutput(text);
   const frames = records.reduce((max, r) => Math.max(max, r.frame + 1), 0);
@@ -131,12 +142,21 @@ export async function detectVisual(
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
   const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
   const videoDataUrl = `data:video/webm;base64,${video.toString('base64')}`;
+  // One SAM request per concept, all in flight at once.
+  const settled = await Promise.all(
+    conceptsFromRulebook().map(async ({ concept, ruleId }) => {
+      const { records, frames } = await segmentConcept(client, concept, videoDataUrl);
+      return {
+        costUsd: (frames / 1000) * PRICING.samVideoPerThousandFramesUsd,
+        flags: flagsForConcept(concept, ruleId, records, frames),
+      };
+    }),
+  );
   const flags: VisualFlag[] = [];
   let costUsd = 0;
-  for (const { concept, ruleId } of conceptsFromRulebook()) {
-    const { records, frames } = await segmentConcept(client, concept, videoDataUrl);
-    costUsd += (frames / 1000) * PRICING.samVideoPerThousandFramesUsd;
-    flags.push(...flagsForConcept(concept, ruleId, records, frames));
+  for (const s of settled) {
+    costUsd += s.costUsd;
+    flags.push(...s.flags);
   }
   return { flags, costUsd };
 }

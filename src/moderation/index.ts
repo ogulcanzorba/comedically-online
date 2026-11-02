@@ -1,4 +1,10 @@
-import type { Decision, ModerationAction, ModerationLogEntry, ModerationMode } from './types';
+import type {
+  Decision,
+  ModerationAction,
+  ModerationLogEntry,
+  ModerationMode,
+  VisualFlag,
+} from './types';
 import type { TranscriptTurn } from './types';
 import { transcribeChunk } from './transcribe';
 import { detectVisual } from './detect-visual';
@@ -59,36 +65,67 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   const fellBack = mode !== requested;
   let costUsd = 0;
 
-  let transcriptText = '';
-  let turns: TranscriptTurn[] = [];
-  try {
-    const t = await transcribeChunk(args.wav, args.seq, mode);
-    transcriptText = t.transcript.text;
-    turns = t.transcript.turns;
-    costUsd += t.costUsd;
-  } catch {
-    // Transcription failed: continue with visuals only, note it in the log.
+  // Transcription and visual detection run concurrently; the judge still needs
+  // the transcript, so it runs after. Each stage fails independently.
+  async function runTranscribe(): Promise<{
+    text: string;
+    turns: TranscriptTurn[];
+    costUsd: number;
+    failed: boolean;
+  }> {
+    try {
+      const t = await transcribeChunk(args.wav, args.seq, mode);
+      return { text: t.transcript.text, turns: t.transcript.turns, costUsd: t.costUsd, failed: false };
+    } catch {
+      return { text: '', turns: [], costUsd: 0, failed: true };
+    }
   }
+  async function runDetect(): Promise<{ flags: VisualFlag[]; costUsd: number; failed: boolean }> {
+    try {
+      const v = await detectVisual(args.video, args.seq, mode);
+      return { flags: v.flags, costUsd: v.costUsd, failed: false };
+    } catch {
+      return { flags: [], costUsd: 0, failed: true };
+    }
+  }
+  const [tx, det] = await Promise.all([runTranscribe(), runDetect()]);
+  costUsd += tx.costUsd + det.costUsd;
+  const transcriptText = tx.text;
+  const turns = tx.turns;
 
-  let decisions: Decision[] = [];
-  try {
-    const v = await detectVisual(args.video, args.seq, mode);
-    costUsd += v.costUsd;
-    decisions = v.flags.map((flag) => {
-      const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
-      return {
-        action: 'blur' as const,
-        reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`,
-        startMs: flag.startMs,
-        endMs: flag.endMs,
-        box: flag.box,
-        label: flag.label,
-        ...(flag.ruleId ? { ruleId: flag.ruleId } : {}),
-        ...(rule ? { explanation: rule.explanation } : {}),
-      };
+  const decisions: Decision[] = [];
+  // Fail closed in live mode: a dead stage censors the whole chunk instead of
+  // releasing it unmodified. Mock mode never fails, so it is unchanged.
+  if (tx.failed && mode === 'live') {
+    decisions.push({
+      action: 'bleep',
+      reason: 'moderation unavailable: transcription failed; audio muted in full',
+      startMs: 0,
+      endMs: 2000,
     });
-  } catch {
-    // Visual detection failed: continue with audio only.
+  }
+  if (det.failed && mode === 'live') {
+    decisions.push({
+      action: 'blur',
+      reason: 'moderation unavailable: visual detection failed; frame blurred in full',
+      startMs: 0,
+      endMs: 2000,
+      box: { x: 0, y: 0, w: 1, h: 1 },
+      label: 'full frame (moderation unavailable)',
+    });
+  }
+  for (const flag of det.flags) {
+    const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
+    decisions.push({
+      action: 'blur' as const,
+      reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`,
+      startMs: flag.startMs,
+      endMs: flag.endMs,
+      box: flag.box,
+      label: flag.label,
+      ...(flag.ruleId ? { ruleId: flag.ruleId } : {}),
+      ...(rule ? { explanation: rule.explanation } : {}),
+    });
   }
 
   let judgeReason = mode === 'mock' ? 'mock: nothing flagged' : 'nothing flagged';
@@ -130,7 +167,15 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   const entryAction = SEVERITY.find((a) => actions.has(a)) ?? 'allow';
   const reasonParts: string[] = [];
   if (fellBack) reasonParts.push('spend cap reached; mock fallback.');
-  if (decisions.some((d) => d.action === 'blur')) reasonParts.push('blur: visual match.');
+  if (tx.failed && mode === 'live') {
+    reasonParts.push('moderation unavailable: transcription failed, bleeped in full.');
+  }
+  if (det.failed && mode === 'live') {
+    reasonParts.push('moderation unavailable: visual detection failed, blurred in full.');
+  }
+  if (!det.failed && decisions.some((d) => d.action === 'blur')) {
+    reasonParts.push('blur: visual match.');
+  }
   reasonParts.push(judgeReason);
   if (transcriptText.trim().length === 0 && decisions.length === 0) {
     reasonParts.push('(no speech detected)');
