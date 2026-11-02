@@ -135,7 +135,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
         )}
       </section>
 
-      <section aria-label="Broadcast recap" className="mt-8">
+      <section id="recap" aria-label="Broadcast recap" className="mt-8 scroll-mt-20">
         <h2 className="font-serif text-2xl">Recap: censored moments</h2>
         {censored.length === 0 ? (
           <p className="mt-2 text-sm text-neutral-400">

@@ -52,7 +52,8 @@ npm run dev            # http://localhost:3000
   manager (local time + IANA zone → UTC, tier editor with caps + pay-what-you-want,
   revenue calculator with stated assumptions), per-show pre-live pages (rulebook
   acceptance, self-view + delayed viewer view, live moderation log, censored-moments
-  recap), and the broadcast page at `/studio/go-live` (gated on rulebook acceptance).
+  recap, and in-place broadcast with LIVE badge + elapsed timer (gated on rulebook
+  acceptance). `/studio/go-live` redirects to `/studio` (or the show's prepare page).
 - **Rulebook** (`src/moderation/rulebook.json`, v1.0.0): the data behind mock moderation —
   1 audio bleep rule (“waffle”) + 2 video blur rules (three-finger gesture, nose touch).
   Every decision records its rule id + user-facing explanation; comedians must accept the

@@ -5,10 +5,9 @@ import { getShowById } from '@/db/shows';
 import { getAcceptance } from '@/db/acceptances';
 import { RULEBOOK_RULES, RULEBOOK_VERSION, RULEBOOK_VERSION_HASH } from '@/moderation/rulebook';
 import { RulebookAccept } from '@/components/RulebookAccept';
-import { PrepareCamera } from '@/components/PrepareCamera';
+import { BroadcastStudio } from '@/components/BroadcastStudio';
 import { ShowPlayer } from '@/components/ShowPlayer';
 import { ModerationPanels } from '@/components/ModerationFeed';
-import { GoLiveButton } from '@/components/GoLiveButton';
 
 export const dynamic = 'force-dynamic';
 
@@ -45,11 +44,17 @@ export default async function PreparePage({ params }: { params: Promise<{ id: st
         />
       </div>
 
-      <section aria-label="Rehearsal views" className="mt-8 grid gap-6 md:grid-cols-2">
+      <section aria-label="Broadcast studio" className="mt-8 grid gap-6 md:grid-cols-2">
         <div>
           <h2 className="font-serif text-xl">Self-view</h2>
-          <p className="mb-2 text-sm text-neutral-500">Your camera, right now. Nothing broadcasts from here.</p>
-          <PrepareCamera />
+          <p className="mb-2 text-sm text-neutral-500">
+            Your camera, right now. “Go live now” starts the broadcast in place — the server
+            re-checks your rulebook acceptance first.
+          </p>
+          <BroadcastStudio
+            showId={show.id}
+            accepted={acceptance?.rulebook_hash === RULEBOOK_VERSION_HASH}
+          />
         </div>
         <div>
           <h2 className="font-serif text-xl">Viewer view</h2>
@@ -59,14 +64,6 @@ export default async function PreparePage({ params }: { params: Promise<{ id: st
           </p>
           <ShowPlayer />
         </div>
-      </section>
-
-      <section aria-label="Broadcast" className="mt-8 rounded-md border border-red-500/30 bg-red-500/5 p-5">
-        <h2 className="font-serif text-xl">Ready when you are</h2>
-        <p className="mb-3 mt-1 text-sm text-neutral-400">
-          Opens the broadcast studio for this show. The server re-checks your rulebook acceptance first.
-        </p>
-        <GoLiveButton showId={show.id} />
       </section>
 
       <ModerationPanels showSlug={show.slug} />
