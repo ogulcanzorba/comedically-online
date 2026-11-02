@@ -2,6 +2,8 @@ import { searchShows } from '@/db/shows';
 import { findUserById } from '@/db/users';
 import { countByTier } from '@/db/tickets';
 import { ShowCard } from '@/components/ShowCard';
+import { getSessionUser } from '@/auth/get-session';
+import { isShowOwner } from '@/lib/show-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,6 +16,7 @@ export const metadata = {
 export default async function SearchPage({ searchParams }: { searchParams?: Promise<{ q?: string }> }) {
   const q = ((await searchParams)?.q ?? '').trim();
   const results = q ? searchShows(q) : [];
+  const user = await getSessionUser();
   return (
     <main className="mx-auto max-w-5xl px-6 py-8">
       <h1 className="font-serif text-4xl">Search</h1>
@@ -44,6 +47,7 @@ export default async function SearchPage({ searchParams }: { searchParams?: Prom
             show={show}
             comedianName={findUserById(show.comedian_id)?.stage_name ?? 'Unknown comic'}
             sold={countByTier(show.id)}
+            isOwner={isShowOwner(user?.id, show)}
           />
         ))}
       </section>

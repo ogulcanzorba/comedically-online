@@ -49,8 +49,11 @@ export default async function MyShowsPage() {
                   <LocalTime utc={show.starts_at_utc} /> · {status} · {sold} tickets
                 </p>
               </div>
-              <Link href={`/shows/${show.slug}`} className="text-sm text-neutral-300 underline">
-                View
+              <Link
+                href={`/studio/shows/${show.id}/prepare`}
+                className="rounded-md bg-red-500 px-4 py-2 text-sm font-semibold text-white hover:bg-red-400"
+              >
+                Prepare live show
               </Link>
               <Link href={`/studio/shows/${show.id}`} className="text-sm text-neutral-300 underline">
                 Edit

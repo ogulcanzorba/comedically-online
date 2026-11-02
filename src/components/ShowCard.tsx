@@ -9,10 +9,13 @@ export function ShowCard({
   show,
   comedianName,
   sold,
+  isOwner = false,
 }: {
   show: Show;
   comedianName: string;
   sold: Record<string, number>;
+  /** Owners go to the prepare page, never the ticket flow. */
+  isOwner?: boolean;
 }) {
   const status = showStatus(show.starts_at_utc, show.duration_min);
   const soldOut = isSoldOut(show.tiers, sold);
@@ -20,11 +23,16 @@ export function ShowCard({
   const category = categoryBySlug(show.category_slug);
   return (
     <Link
-      href={`/shows/${show.slug}`}
+      href={isOwner ? `/studio/shows/${show.id}/prepare` : `/shows/${show.slug}`}
       className="group overflow-hidden rounded-md border border-neutral-800 bg-neutral-900/60 hover:border-neutral-600"
     >
       <div className="relative">
         <ShowArt theme={show.thumbnail_theme} title={show.title} className="aspect-video w-full" />
+        {isOwner && (
+          <span className="absolute right-2 top-2 rounded-full bg-amber-300 px-2.5 py-0.5 text-xs font-bold text-neutral-950">
+            Your show
+          </span>
+        )}
         {status === 'live' && (
           <span className="absolute left-2 top-2 rounded-full bg-red-500 px-2.5 py-0.5 text-xs font-bold text-white">
             ● Live now

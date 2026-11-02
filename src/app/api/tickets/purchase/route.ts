@@ -4,6 +4,7 @@ import { countByTier, createTicket, fakeOrderRef, hasTicket } from '@/db/tickets
 import { getSessionUser } from '@/auth/get-session';
 import { checkSameOrigin } from '@/auth/csrf';
 import { showStatus } from '@/lib/datetime';
+import { ownerPurchaseBlockReason } from '@/lib/show-access';
 
 /**
  * MOCK purchase: no payment provider involved. Issues a ticket row with a
@@ -26,6 +27,8 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
   const tierId = typeof b.tierId === 'string' ? b.tierId : '';
   const show = showId ? getShowById(showId) : undefined;
   if (!show) return NextResponse.json({ ok: false, error: 'show not found' }, { status: 404 });
+  const ownerBlock = ownerPurchaseBlockReason(user.id, show);
+  if (ownerBlock) return NextResponse.json({ ok: false, error: ownerBlock }, { status: 403 });
   if (showStatus(show.starts_at_utc, show.duration_min) === 'ended') {
     return NextResponse.json({ ok: false, error: 'show has ended' }, { status: 400 });
   }

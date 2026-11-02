@@ -3,6 +3,8 @@ import { findUserById } from '@/db/users';
 import { listShows } from '@/db/shows';
 import { countByTier } from '@/db/tickets';
 import { ShowCard } from '@/components/ShowCard';
+import { getSessionUser } from '@/auth/get-session';
+import { isShowOwner } from '@/lib/show-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,6 +24,7 @@ export default async function ComedianPage({ params }: { params: Promise<{ id: s
   const comedian = findUserById(id);
   if (!comedian || comedian.role !== 'comedian') notFound();
   const shows = listShows({ comedianId: id });
+  const user = await getSessionUser();
   let styles: string[] = [];
   try {
     const parsed: unknown = JSON.parse(comedian.comedy_styles ?? '[]');
@@ -51,6 +54,7 @@ export default async function ComedianPage({ params }: { params: Promise<{ id: s
             show={show}
             comedianName={comedian.stage_name ?? comedian.display_name}
             sold={countByTier(show.id)}
+            isOwner={isShowOwner(user?.id, show)}
           />
         ))}
       </section>

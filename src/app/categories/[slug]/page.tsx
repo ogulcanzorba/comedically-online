@@ -6,6 +6,8 @@ import { findUserById } from '@/db/users';
 import { countByTier } from '@/db/tickets';
 import { CategoryIcon } from '@/components/CategoryIcon';
 import { ShowCard } from '@/components/ShowCard';
+import { getSessionUser } from '@/auth/get-session';
+import { isShowOwner } from '@/lib/show-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -25,6 +27,7 @@ export default async function CategoryPage({ params }: { params: Promise<{ slug:
   const category = categoryBySlug(slug);
   if (!category) notFound();
   const shows = listShows({ category: slug });
+  const user = await getSessionUser();
   return (
     <main className="mx-auto max-w-5xl px-6 py-8">
       <Link href="/categories" className="text-sm text-neutral-400 hover:text-neutral-200">
@@ -42,6 +45,7 @@ export default async function CategoryPage({ params }: { params: Promise<{ slug:
             show={show}
             comedianName={findUserById(show.comedian_id)?.stage_name ?? 'Unknown comic'}
             sold={countByTier(show.id)}
+            isOwner={isShowOwner(user?.id, show)}
           />
         ))}
       </section>

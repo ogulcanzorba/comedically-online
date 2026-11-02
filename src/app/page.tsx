@@ -7,6 +7,7 @@ import { ShowCard } from '@/components/ShowCard';
 import { JsonLd, siteUrl } from '@/components/JsonLd';
 import { getSessionUser } from '@/auth/get-session';
 import { homeVariant } from '@/auth/redirects';
+import { isShowOwner } from '@/lib/show-access';
 
 export const dynamic = 'force-dynamic';
 
@@ -165,6 +166,7 @@ export default async function HomePage({
               show={show}
               comedianName={findUserById(show.comedian_id)?.stage_name ?? 'Unknown comic'}
               sold={countByTier(show.id)}
+              isOwner={isShowOwner(user?.id, show)}
             />
           ))}
         </section>

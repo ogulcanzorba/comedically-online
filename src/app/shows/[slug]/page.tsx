@@ -8,6 +8,7 @@ import { getShowTags } from '@/db/tags';
 import { categoryBySlug } from '@/data/categories';
 import { getSessionUser } from '@/auth/get-session';
 import { formatCents, isSoldOut, showStatus } from '@/lib/datetime';
+import { isShowOwner, ticketSectionMode } from '@/lib/show-access';
 import { ShowArt } from '@/components/ShowArt';
 import { LocalTime } from '@/components/LocalTime';
 import { Countdown } from '@/components/Countdown';
@@ -42,6 +43,8 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
   const category = categoryBySlug(show.category_slug);
   const user = await getSessionUser();
   const ticketHeld = user ? hasTicket(user.id, show.id) : false;
+  const owner = isShowOwner(user?.id, show);
+  const ticketMode = ticketSectionMode({ isOwner: owner, ticketHeld });
 
   const startMs = Date.parse(show.starts_at_utc);
   return (
@@ -110,8 +113,18 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
 
       {status === 'live' && (
         <section aria-label="Watch live" className="mt-6">
-          {ticketHeld ? (
+          {ticketHeld && !owner ? (
             <ShowPlayer />
+          ) : owner ? (
+            <div className="rounded-md border border-neutral-700 bg-neutral-900/60 p-6">
+              <p className="font-semibold">You&apos;re live — run it from your prepare page.</p>
+              <Link
+                href={`/studio/shows/${show.id}/prepare`}
+                className="mt-3 inline-block rounded-md bg-red-500 px-5 py-2 text-sm font-semibold text-white hover:bg-red-400"
+              >
+                Prepare live show
+              </Link>
+            </div>
           ) : (
             <div className="rounded-md border border-amber-200/40 bg-amber-100/10 p-6">
               <p className="font-semibold text-amber-100">This show is live — grab a ticket to watch.</p>
@@ -154,7 +167,26 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
 
       <section aria-label="Tickets" className="mt-8">
         <h2 className="font-serif text-2xl">Tickets</h2>
-        {ticketHeld && (
+        {ticketMode === 'owner' && (
+          <div className="mt-3 rounded-md border border-neutral-700 bg-neutral-900/60 p-4">
+            <p className="text-sm text-neutral-300">
+              This is your show — no ticket needed. Rehearse, accept the rulebook, and go live from
+              the prepare page.
+            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <Link
+                href={`/studio/shows/${show.id}/prepare`}
+                className="rounded-md bg-red-500 px-5 py-2 text-sm font-semibold text-white hover:bg-red-400"
+              >
+                Prepare live show
+              </Link>
+              <Link href={`/studio/shows/${show.id}`} className="text-sm text-neutral-300 underline">
+                Edit show
+              </Link>
+            </div>
+          </div>
+        )}
+        {ticketMode === 'held' && (
           <p className="mt-3 rounded-md border border-emerald-400/40 bg-emerald-400/10 p-3 text-sm text-emerald-200">
             You&apos;re in — ticket held on your account.
           </p>
@@ -180,7 +212,7 @@ export default async function ShowPage({ params }: { params: Promise<{ slug: str
                     {tierSoldOut && <span> · sold out</span>}
                   </p>
                 </div>
-                {!ticketHeld && !tierSoldOut && status !== 'ended' && (
+                {ticketMode === 'buy' && !tierSoldOut && status !== 'ended' && (
                   <Link
                     href={`/checkout?show=${show.slug}&tier=${tier.id}`}
                     className="rounded-md bg-amber-300 px-5 py-2 text-sm font-semibold text-neutral-950 hover:bg-amber-200"
