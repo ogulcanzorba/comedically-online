@@ -3,6 +3,7 @@
 import { useEffect, useState } from 'react';
 import type { ChunkDebug, Decision } from '@/moderation/types';
 import rulebookData from '@/moderation/rulebook.json';
+import { localRecording, useLocalRecording } from '@/lib/local-recording';
 
 export interface FeedEvent {
   seq: number;
@@ -132,18 +133,47 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
   );
 }
 
+/** Per-event violation clip from the device-local recording, with play + download. */
+function ClipCell({ seq, playing, onToggle }: { seq: number; playing: boolean; onToggle: () => void }) {
+  const clip = localRecording.clipFor(seq);
+  if (!clip) return <span className="text-neutral-600">—</span>;
+  return (
+    <div>
+      <div className="flex gap-2 text-xs">
+        <button onClick={onToggle} className="text-neutral-300 underline hover:text-white">
+          {playing ? 'Close' : 'Play'}
+        </button>
+        <a
+          href={clip.url}
+          download={`comedically-clip-seq${seq}.webm`}
+          className="text-neutral-300 underline hover:text-white"
+        >
+          Download
+        </a>
+      </div>
+      {playing && (
+        <video src={clip.url} controls preload="metadata" className="mt-2 w-64 max-w-full rounded-md bg-black" />
+      )}
+    </div>
+  );
+}
+
 /** Live log table + post-broadcast recap, fed by one passive relay connection. */
 export function ModerationPanels({ showSlug }: { showSlug: string }) {
   const events = useModerationFeed(showSlug);
+  useLocalRecording(); // refresh clip cells as recording blobs land
+  const [playing, setPlaying] = useState<number | null>(null);
+  const showClips = localRecording.hasRecording;
   const live = [...events].reverse().slice(0, 20);
   const censored = events.filter((e) => e.decisions.some((d) => d.action === 'bleep' || d.action === 'blur'));
+  const toggle = (seq: number): void => setPlaying((prev) => (prev === seq ? null : seq));
 
   return (
     <>
       <section aria-label="Live moderation log" className="mt-8">
         <h2 className="font-serif text-2xl">Moderation log</h2>
         <p className="mt-1 text-sm text-neutral-500">
-          Flagged chunks as they air (10s behind you). Empty until the broadcast hits a rule.
+          Flagged chunks as they air (15s behind you). Empty until the broadcast hits a rule.
         </p>
         {live.length === 0 ? (
           <p className="mt-3 rounded-md border border-neutral-800 bg-neutral-900/60 p-4 text-sm text-neutral-400">
@@ -160,6 +190,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                   <th className="px-3 py-2 font-medium">Action</th>
                   <th className="px-3 py-2 font-medium">Why</th>
                   <th className="px-3 py-2 font-medium">Debug</th>
+                  {showClips && <th className="px-3 py-2 font-medium">Clip</th>}
                 </tr>
               </thead>
               <tbody>
@@ -176,6 +207,11 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                       {i === 0 && (
                         <td rowSpan={e.decisions.length} className="px-3 py-2 align-top">
                           <DebugCell debug={e.debug} />
+                        </td>
+                      )}
+                      {showClips && i === 0 && (
+                        <td rowSpan={e.decisions.length} className="px-3 py-2 align-top">
+                          <ClipCell seq={e.seq} playing={playing === e.seq} onToggle={() => toggle(e.seq)} />
                         </td>
                       )}
                     </tr>
@@ -195,19 +231,26 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
           </p>
         ) : (
           <ul className="mt-3 space-y-2">
-            {censored.map((e) =>
-              e.decisions
-                .filter((d) => d.action === 'bleep' || d.action === 'blur')
-                .map((d, i) => (
-                  <li key={`${e.seq}-${i}`} className="rounded-md border border-neutral-800 bg-neutral-900/60 p-3 text-sm">
-                    <span className="font-mono text-xs text-neutral-500">@{sceneTime(e.seq)}</span>{' '}
-                    <span className="font-semibold text-amber-200">{d.action}</span>{' '}
-                    <span className="text-neutral-400">
-                      — {ruleLabel(d.ruleId)}: {d.explanation ?? d.reason}
-                    </span>
-                  </li>
-                )),
-            )}
+            {censored.map((e) => (
+              <li key={e.seq} className="rounded-md border border-neutral-800 bg-neutral-900/60 p-3 text-sm">
+                {e.decisions
+                  .filter((d) => d.action === 'bleep' || d.action === 'blur')
+                  .map((d, i) => (
+                    <p key={i}>
+                      <span className="font-mono text-xs text-neutral-500">@{sceneTime(e.seq)}</span>{' '}
+                      <span className="font-semibold text-amber-200">{d.action}</span>{' '}
+                      <span className="text-neutral-400">
+                        — {ruleLabel(d.ruleId)}: {d.explanation ?? d.reason}
+                      </span>
+                    </p>
+                  ))}
+                {showClips && (
+                  <div className="mt-2">
+                    <ClipCell seq={e.seq} playing={playing === e.seq} onToggle={() => toggle(e.seq)} />
+                  </div>
+                )}
+              </li>
+            ))}
           </ul>
         )}
       </section>

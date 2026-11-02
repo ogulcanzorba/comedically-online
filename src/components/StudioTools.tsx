@@ -62,7 +62,7 @@ const CARDS = [
     icon: 'delay',
     title: 'Preview delay',
     href: '/studio/delay',
-    text: 'See how the 10-second broadcast delay works.',
+    text: 'See how the 15-second broadcast delay works.',
   },
 ];
 

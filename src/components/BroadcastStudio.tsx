@@ -1,6 +1,13 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+import type { ModerationLogEntry } from '@/moderation/types';
+import rulebookData from '@/moderation/rulebook.json';
+import { localRecording } from '@/lib/local-recording';
+
+const TITLES = new Map(
+  (rulebookData.rules as Array<{ id: string; title: string }>).map((r) => [r.id, r.title]),
+);
 
 /** AudioWorklet processor: forwards mic samples to the main thread. */
 const WORKLET_CODE = `
@@ -59,10 +66,16 @@ function formatElapsed(totalSec: number): string {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function formatScene(seq: number): string {
+  const s = seq * 2;
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+}
+
 /**
  * In-place broadcast studio: camera/mic capture, relay publish, start/stop.
- * Extracted from the old go-live page; the relay protocol is unchanged.
- * Lives on the pre-live page next to the delayed viewer view and live log.
+ * Lives on the pre-live page next to the moderation log. Violation toasts and
+ * the timeline come from the relay's publisher log channel (near real time);
+ * the log below shows the same moments as they air on the 15s delay.
  */
 export function BroadcastStudio({ showId, accepted }: { showId: string; accepted: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -71,11 +84,15 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const wsRef = useRef<WebSocket | null>(null);
   const seqRef = useRef(0);
   const liveSinceRef = useRef(0);
+  const sendChainRef = useRef(Promise.resolve());
+  const toastTimerRef = useRef<number | null>(null);
   const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
   const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'ended'>('idle');
   const [error, setError] = useState('');
   const [needsAcceptance, setNeedsAcceptance] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  const [violations, setViolations] = useState<ModerationLogEntry[]>([]);
+  const [toast, setToast] = useState<ModerationLogEntry | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -102,6 +119,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
       streamRef.current?.getTracks().forEach((t) => t.stop());
       wsRef.current?.close();
       wsRef.current = null;
+      if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
     };
   }, []);
 
@@ -167,6 +185,23 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     return encodeWav(windowed, 16000);
   }
 
+  function handlePublisherMessage(ev: MessageEvent): void {
+    if (typeof ev.data !== 'string') return;
+    let msg: unknown;
+    try {
+      msg = JSON.parse(ev.data) as unknown;
+    } catch {
+      return;
+    }
+    const entry = (msg as { type?: string; entry?: ModerationLogEntry }).entry;
+    if ((msg as { type?: string }).type !== 'log' || !entry || typeof entry.seq !== 'number') return;
+    if (entry.action !== 'bleep' && entry.action !== 'blur') return;
+    setViolations((prev) => (prev.some((v) => v.seq === entry.seq) ? prev : [...prev, entry]));
+    setToast(entry);
+    if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = window.setTimeout(() => setToast(null), 8000);
+  }
+
   async function goLive(): Promise<void> {
     const stream = streamRef.current;
     if (!stream || wsRef.current) return;
@@ -191,14 +226,15 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=publisher`,
       );
       wsRef.current = ws;
-      ws.onmessage = () => {
-        // Publisher log entries arrive here; the page's live log panel renders them.
-      };
+      ws.onmessage = handlePublisherMessage;
       await new Promise<void>((resolve, reject) => {
         ws.onopen = () => resolve();
         ws.onerror = () => reject(new Error('websocket'));
       });
       seqRef.current = 0;
+      setViolations([]);
+      setToast(null);
+      localRecording.start();
       await startAudioCapture(stream);
       const mimeType =
         ['video/webm;codecs=vp8,opus', 'video/webm'].find((t) => MediaRecorder.isTypeSupported(t)) ??
@@ -209,17 +245,25 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         if (ev.data.size === 0 || ws.readyState !== WebSocket.OPEN) return;
         const seq = seqRef.current;
         seqRef.current += 1;
-        void ev.data.arrayBuffer().then((buf) => {
-          const sock = wsRef.current;
-          if (!sock || sock.readyState !== WebSocket.OPEN) return;
-          sock.send(JSON.stringify({ type: 'media', kind: 'webm', seq }));
-          sock.send(buf);
-          const wav = drainWav();
-          if (wav) {
-            sock.send(JSON.stringify({ type: 'media', kind: 'wav', seq }));
-            sock.send(wav);
-          }
-        });
+        localRecording.push(seq, ev.data);
+        // Serialized sends: chunk N+1 never overtakes chunk N, so server seqs
+        // match studio seqs exactly (and the local recording stays aligned).
+        sendChainRef.current = sendChainRef.current
+          .then(async () => {
+            const buf = await ev.data.arrayBuffer();
+            const sock = wsRef.current;
+            if (!sock || sock.readyState !== WebSocket.OPEN) return;
+            sock.send(JSON.stringify({ type: 'media', kind: 'webm', seq }));
+            sock.send(buf);
+            const wav = drainWav();
+            if (wav) {
+              sock.send(JSON.stringify({ type: 'media', kind: 'wav', seq }));
+              sock.send(wav);
+            }
+          })
+          .catch((e: unknown) => {
+            console.warn(`[studio] chunk ${seq} send failed:`, e);
+          });
       };
       rec.start(2000);
       liveSinceRef.current = Date.now();
@@ -238,9 +282,14 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     wsRef.current?.close();
     wsRef.current = null;
     stopAudioCapture();
+    localRecording.end();
+    setToast(null);
     setStatus('ended');
     document.getElementById('recap')?.scrollIntoView({ behavior: 'smooth' });
   }
+
+  const full = status === 'ended' ? localRecording.full() : null;
+  const span = Math.max(elapsed, ...violations.map((v) => v.seq * 2 + 2), 1);
 
   return (
     <div>
@@ -270,14 +319,54 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         </p>
       )}
 
-      <video
-        ref={videoRef}
-        muted
-        playsInline
-        className="mt-3 aspect-video w-full rounded-md bg-black"
-        aria-label="Self-view camera preview"
-      />
-      <div className="mt-3">
+      <div className="relative">
+        <video
+          ref={videoRef}
+          muted
+          playsInline
+          className="mt-3 aspect-video w-full rounded-md bg-black"
+          aria-label="Self-view camera preview"
+        />
+        {toast && (
+          <div
+            role="status"
+            className="absolute left-3 top-6 max-w-[85%] rounded-md border border-amber-200/40 bg-neutral-950/90 p-3"
+          >
+            <p className="text-sm font-semibold text-amber-200">
+              <span aria-hidden="true" className="mr-1 inline-block h-2 w-2 rounded-full bg-amber-300" />
+              {toast.ruleId ? (TITLES.get(toast.ruleId) ?? toast.ruleId) : 'Moderation'} ·{' '}
+              {toast.action === 'bleep' ? 'word muted' : 'region blurred'}
+            </p>
+            <p className="mt-1 line-clamp-3 text-xs text-neutral-300" title={toast.reason}>
+              {toast.reason}
+            </p>
+          </div>
+        )}
+      </div>
+
+      {(status === 'live' || status === 'ended') && (
+        <div className="mt-2" aria-label="Violation timeline">
+          <div className="relative h-2 rounded bg-neutral-800" role="img" aria-label={`${violations.length} flagged moments`}>
+            {violations.map((v) => (
+              <span
+                key={v.seq}
+                title={`@${formatScene(v.seq)} ${v.action}: ${v.ruleId ? (TITLES.get(v.ruleId) ?? v.ruleId) : 'moderation'} — ${v.reason}`}
+                className={`absolute top-0 h-2 w-2 -translate-x-1/2 rounded-full ${
+                  v.action === 'bleep' ? 'bg-red-400' : 'bg-amber-300'
+                }`}
+                style={{ left: `${Math.min(100, ((v.seq * 2) / span) * 100)}%` }}
+              />
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-neutral-500">
+            {violations.length === 0
+              ? 'No violations — clean set so far.'
+              : `${violations.length} flagged moment${violations.length === 1 ? '' : 's'} (clips below).`}
+          </p>
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-3">
         {status === 'live' ? (
           <button
             onClick={endBroadcast}
@@ -295,11 +384,20 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
             Go live now
           </button>
         )}
+        {status === 'ended' && full && (
+          <a
+            href={full.url}
+            download={`comedically-${showId}-full.webm`}
+            className="rounded-md border border-neutral-600 px-4 py-2 text-sm hover:border-neutral-400"
+          >
+            Download full recording ({formatElapsed(full.seconds)})
+          </a>
+        )}
       </div>
 
       <p className="mt-4 text-sm text-neutral-500">
         Moderation follows the platform rulebook you accepted above — there is nothing to configure
-        here.
+        here. Recording stays on this device.
       </p>
     </div>
   );

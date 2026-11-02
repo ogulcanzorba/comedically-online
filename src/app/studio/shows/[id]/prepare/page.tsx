@@ -6,7 +6,6 @@ import { getAcceptance } from '@/db/acceptances';
 import { RULEBOOK_RULES, RULEBOOK_VERSION, RULEBOOK_VERSION_HASH } from '@/moderation/rulebook';
 import { RulebookAccept } from '@/components/RulebookAccept';
 import { BroadcastStudio } from '@/components/BroadcastStudio';
-import { ShowPlayer } from '@/components/ShowPlayer';
 import { ModerationPanels } from '@/components/ModerationFeed';
 
 export const dynamic = 'force-dynamic';
@@ -44,25 +43,18 @@ export default async function PreparePage({ params }: { params: Promise<{ id: st
         />
       </div>
 
-      <section aria-label="Broadcast studio" className="mt-8 grid gap-6 md:grid-cols-2">
+      <section aria-label="Broadcast studio" className="mt-8 max-w-2xl">
         <div>
           <h2 className="font-serif text-xl">Self-view</h2>
           <p className="mb-2 text-sm text-neutral-500">
             Your camera, right now. “Go live now” starts the broadcast in place — the server
-            re-checks your rulebook acceptance first.
+            re-checks your rulebook acceptance first. Viewers watch the delayed stream on the show
+            page; nothing autoplays here.
           </p>
           <BroadcastStudio
             showId={show.id}
             accepted={acceptance?.rulebook_hash === RULEBOOK_VERSION_HASH}
           />
-        </div>
-        <div>
-          <h2 className="font-serif text-xl">Viewer view</h2>
-          <p className="mb-2 text-sm text-neutral-500">
-            What viewers see on the live relay, <strong>10s after capture</strong>. When you go live,
-            your stream appears here about 12s later (10s delay + one 2s chunk).
-          </p>
-          <ShowPlayer />
         </div>
       </section>
 

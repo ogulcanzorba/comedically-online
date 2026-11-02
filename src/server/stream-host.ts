@@ -47,6 +47,8 @@ export class StreamHost {
   private readonly startedViewers = new Set<WebSocket>();
   private publisher: WebSocket | null = null;
   private readonly forceReleased = new Set<number>();
+  /** Studio seqs whose moderation already started (labels late/orphaned wavs). */
+  private readonly startedStudio = new Set<number>();
   private readonly log: ModerationLogEntry[] = [];
   private readonly transcriptWindow: Array<{ atMs: number; text: string }> = [];
   private readonly tracker = new SpendTracker();
@@ -133,6 +135,7 @@ export class StreamHost {
     this.chunkDebug.clear();
     this.pendingModeration.clear();
     this.forceReleased.clear();
+    this.startedStudio.clear();
     this.pendingMedia.clear();
     this.pendingMeta = null;
     this.initSegment = null;
@@ -175,6 +178,12 @@ export class StreamHost {
     }
     if (kind === 'wav') {
       pending.wav = data;
+      const state = this.startedStudio.has(studioSeq)
+        ? 'late-orphan'
+        : pending.webm
+          ? 'paired'
+          : 'early';
+      console.log(`[rx] wav studio=${studioSeq} (${state}, ${data.length}B)`);
     } else {
       const serverSeq = this.nextSeq;
       this.nextSeq += 1;
@@ -184,6 +193,7 @@ export class StreamHost {
       pending.webm = { data, receiptTimeMs };
       pending.serverSeq = serverSeq;
       this.pendingModeration.add(serverSeq);
+      console.log(`[rx] webm studio=${studioSeq} -> server=${serverSeq} (${data.length}B)`);
       pending.timer = setTimeout(() => this.startModeration(studioSeq), this.audioWaitMs);
       if (typeof pending.timer.unref === 'function') pending.timer.unref();
     }
@@ -198,7 +208,9 @@ export class StreamHost {
     pending.started = true;
     if (pending.timer) clearTimeout(pending.timer);
     this.pendingMedia.delete(studioSeq);
+    this.startedStudio.add(studioSeq);
     const seq = pending.serverSeq;
+    console.log(`[mod] start server=${seq} (studio=${studioSeq}, wav=${pending.wav ? 'yes' : 'no'})`);
     // Detection input must be a standalone clip: later chunks are bare
     // clusters, so the retained init segment is prepended before transcoding.
     // Playback still uses the original WebM bytes from the delay buffer.
@@ -215,10 +227,17 @@ export class StreamHost {
         if (this.forceReleased.has(seq)) {
           // Already released censored by max hold: keep the transcript for
           // judge context but don't overwrite the decisions or the log.
+          // Still print the debug line (marked late) so no chunk vanishes silently.
           this.forceReleased.delete(seq);
           if (res.transcriptText.trim().length > 0) {
             this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
           }
+          console.log(
+            `[debug] chunk #${seq} LATE (force-released earlier) lang=${res.debug.language} ` +
+              `rule=${res.debug.matchedRule ?? 'none'} voice=${res.debug.timingsMs.voiceMs}ms ` +
+              `sam=${res.debug.timingsMs.samMs}ms judge=${res.debug.timingsMs.judgeMs}ms ` +
+              `transcript=${JSON.stringify(res.debug.transcript)}`,
+          );
           return;
         }
         this.decisions.set(seq, res.decisions);
@@ -300,6 +319,10 @@ export class StreamHost {
         errors: { sam: `max hold exceeded (${this.maxOverdueMs}ms past the delay)` },
       });
       this.pushLog({ seq: chunk.seq, at: new Date().toISOString(), action: 'bleep', reason });
+      console.log(
+        `[hold] chunk #${chunk.seq} force-released censored ` +
+          `(unmoderated ${nowMs - chunk.receiptTimeMs - this.buffer.delay}ms past the delay)`,
+      );
     }
   }
 
@@ -322,6 +345,7 @@ export class StreamHost {
         this.startedViewers.add(ws);
       }
     }
+    console.log(`[tx] released seqs=[${due.map((c) => c.seq).join(',')}]`);
   }
 
   private sendChunk(

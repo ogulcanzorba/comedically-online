@@ -46,14 +46,16 @@ npm run dev            # http://localhost:3000
   rate limit, same-origin CSRF guard, 18+ confirmation, server-side validation.
 - **Shows**: public grid with category filter + search, SVG/gradient thumbnails, Live/Sold-out
   badges; show pages with countdown, viewer-local start time, comedian profile, tiers, tags.
-- **Watch**: at start time the page becomes the player (10s broadcast delay, bleep/blur
+- **Watch**: at start time the page becomes the player (15s broadcast delay, bleep/blur
   overlay, never cuts). Requires login + ticket; `/watch` redirects to Demo Night.
 - **Studio** (comedian-only): overview dashboard with tool cards, `/studio/shows` show
   manager (local time + IANA zone → UTC, tier editor with caps + pay-what-you-want,
   revenue calculator with stated assumptions), per-show pre-live pages (rulebook
-  acceptance, self-view + delayed viewer view, live moderation log, censored-moments
-  recap, and in-place broadcast with LIVE badge + elapsed timer (gated on rulebook
-  acceptance). `/studio/go-live` redirects to `/studio` (or the show's prepare page).
+  acceptance, self-view with violation toasts + timeline and device-local recording
+  (violation clips + full download, never uploaded), live moderation log,
+  censored-moments recap, and in-place broadcast with LIVE badge + elapsed timer
+  (gated on rulebook acceptance). `/studio/go-live` redirects to `/studio` (or the
+  show's prepare page).
 - **Rulebook** (`src/moderation/rulebook.json`, v1.0.0): the data behind mock moderation —
   1 audio bleep rule (“waffle”) + 2 video blur rules (three-finger gesture, nose touch).
   Every decision records its rule id + user-facing explanation; comedians must accept the
@@ -71,7 +73,7 @@ npm run dev            # http://localhost:3000
 ## How streaming + moderation work (unchanged from Phase 1)
 
 2s WebM chunks + parallel 16kHz WAV over one WebSocket; server ring buffer releases
-chunk + decisions exactly 10s after server receipt. Mock mode scripts bleeps/blurs;
+chunk + decisions exactly 15s after server receipt. Mock mode scripts bleeps/blurs;
 live mode uses Voice Transcribe + SAM 3.1 video + the Spark judge behind the spend cap.
 
 ## Checks
@@ -79,7 +81,7 @@ live mode uses Voice Transcribe + SAM 3.1 video + the Spark judge behind the spe
 ```bash
 npm run typecheck   # strict TS, must be clean
 npm test            # 8 suites (auth, delay, moderation, overlay, datetime, timezone, pricing, tags)
-npm run prove:relay # end-to-end relay proof with the real 10s delay (~15s)
+npm run prove:relay # end-to-end relay proof with the real 15s delay (~20s)
 npm run build       # production build incl. middleware + sitemap
 npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
 ```
