@@ -2,7 +2,7 @@ import OpenAI from 'openai';
 import type { ModerationMode, NormBox, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
 import { PRICING } from './cost';
-import { startTimeout } from './timeout';
+import { samTimeoutMs, startTimeout } from './timeout';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
@@ -54,7 +54,7 @@ async function segmentConcept(
   concept: string,
   videoDataUrl: string,
 ): Promise<{ records: ParsedRecord[]; frames: number }> {
-  const t = startTimeout();
+  const t = startTimeout(samTimeoutMs());
   let text = '';
   try {
     const stream = client.responses.stream(

@@ -53,3 +53,22 @@ export interface ModerationLogEntry {
   ruleId?: string;
   explanation?: string;
 }
+
+/** Per-stage durations for one chunk (voice and sam run concurrently). */
+export interface ChunkTimings {
+  voiceMs: number;
+  samMs: number;
+  judgeMs: number;
+}
+
+/** Per-chunk debug detail: what the models saw, matched, and cost in time. */
+export interface ChunkDebug {
+  transcript: string;
+  /** Detected language tag, or 'unknown' when the API reports none. */
+  language: string;
+  /** Rulebook rule behind the primary decision, when one applies. */
+  matchedRule: string | null;
+  timingsMs: ChunkTimings;
+  /** Raw stage errors (sanitized, truncated, never secrets). Omitted when empty. */
+  errors: { voice?: string; sam?: string; judge?: string };
+}

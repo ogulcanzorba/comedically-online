@@ -1,13 +1,14 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import type { Decision } from '@/moderation/types';
+import type { ChunkDebug, Decision } from '@/moderation/types';
 import rulebookData from '@/moderation/rulebook.json';
 
 export interface FeedEvent {
   seq: number;
   at: number;
   decisions: Decision[];
+  debug?: ChunkDebug;
 }
 
 const TITLES = new Map(
@@ -54,18 +55,23 @@ function useModerationFeed(showSlug: string): FeedEvent[] {
       `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer`,
     );
     ws.binaryType = 'arraybuffer';
-    let pending: { seq: number; decisions: Decision[] } | null = null;
+    let pending: { seq: number; decisions: Decision[]; debug?: ChunkDebug } | null = null;
     ws.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data === 'string') {
         try {
-          pending = JSON.parse(ev.data) as { seq: number; decisions: Decision[] };
+          pending = JSON.parse(ev.data) as { seq: number; decisions: Decision[]; debug?: ChunkDebug };
         } catch {
           pending = null;
         }
         return;
       }
       if (pending && Array.isArray(pending.decisions) && pending.decisions.length > 0) {
-        const evt: FeedEvent = { seq: pending.seq, at: Date.now(), decisions: pending.decisions };
+        const evt: FeedEvent = {
+          seq: pending.seq,
+          at: Date.now(),
+          decisions: pending.decisions,
+          ...(pending.debug ? { debug: pending.debug } : {}),
+        };
         setEvents((prev) => {
           if (prev.some((e) => e.seq === evt.seq)) return prev;
           const next = [...prev, evt].slice(-200);
@@ -84,6 +90,46 @@ function useModerationFeed(showSlug: string): FeedEvent[] {
 function ruleLabel(ruleId: string | undefined): string {
   if (!ruleId) return '—';
   return TITLES.get(ruleId) ?? ruleId;
+}
+
+/** Collapsible per-chunk debug: transcript, language, rule, stage timings, raw errors. */
+function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
+  if (!debug) return <span className="text-neutral-600">—</span>;
+  const errors = Object.entries(debug.errors);
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer text-neutral-400 hover:text-neutral-200">Debug</summary>
+      <dl className="mt-1 space-y-1 font-mono text-[11px] text-neutral-400">
+        <div>
+          <dt className="inline text-neutral-500">transcript: </dt>
+          <dd className="inline break-words">{JSON.stringify(debug.transcript) || '(empty)'}</dd>
+        </div>
+        <div>
+          <dt className="inline text-neutral-500">language: </dt>
+          <dd className="inline">{debug.language}</dd>
+        </div>
+        <div>
+          <dt className="inline text-neutral-500">rule: </dt>
+          <dd className="inline">{debug.matchedRule ?? 'none'}</dd>
+        </div>
+        <div>
+          <dt className="inline text-neutral-500">timings: </dt>
+          <dd className="inline">
+            voice {debug.timingsMs.voiceMs}ms · sam {debug.timingsMs.samMs}ms · judge{' '}
+            {debug.timingsMs.judgeMs}ms
+          </dd>
+        </div>
+        {errors.length > 0 && (
+          <div>
+            <dt className="inline text-neutral-500">errors: </dt>
+            <dd className="inline break-words text-red-300">
+              {errors.map(([stage, msg]) => `${stage}: ${msg}`).join(' | ')}
+            </dd>
+          </div>
+        )}
+      </dl>
+    </details>
+  );
 }
 
 /** Live log table + post-broadcast recap, fed by one passive relay connection. */
@@ -113,6 +159,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                   <th className="px-3 py-2 font-medium">Rule</th>
                   <th className="px-3 py-2 font-medium">Action</th>
                   <th className="px-3 py-2 font-medium">Why</th>
+                  <th className="px-3 py-2 font-medium">Debug</th>
                 </tr>
               </thead>
               <tbody>
@@ -126,6 +173,11 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                       <td className="px-3 py-2">{ruleLabel(d.ruleId)}</td>
                       <td className="px-3 py-2 font-semibold text-amber-200">{d.action}</td>
                       <td className="px-3 py-2 text-xs text-neutral-400">{d.explanation ?? d.reason}</td>
+                      {i === 0 && (
+                        <td rowSpan={e.decisions.length} className="px-3 py-2 align-top">
+                          <DebugCell debug={e.debug} />
+                        </td>
+                      )}
                     </tr>
                   )),
                 )}

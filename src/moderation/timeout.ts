@@ -1,5 +1,26 @@
-/** Per-model-call timeout (ms). A timed-out call throws and is treated as an error. */
-export const MODEL_TIMEOUT_MS = 6000;
+/**
+ * Per-model call timeouts (ms). A timed-out call throws and is treated as
+ * an error by the pipeline. Overridable via env for slow networks/rehearsal.
+ */
+function envMs(name: string, fallback: number): number {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+/** Muse Voice Transcribe timeout. Default 8s. */
+export function voiceTimeoutMs(): number {
+  return envMs('VOICE_TIMEOUT_MS', 8_000);
+}
+
+/** SAM 3.1 video timeout. Default 20s: video segmentation is the slow stage. */
+export function samTimeoutMs(): number {
+  return envMs('SAM_TIMEOUT_MS', 20_000);
+}
+
+/** muse-spark judge timeout. Default 8s. */
+export function sparkTimeoutMs(): number {
+  return envMs('SPARK_TIMEOUT_MS', 8_000);
+}
 
 export interface TimeoutScope {
   signal: AbortSignal;
@@ -8,7 +29,7 @@ export interface TimeoutScope {
   throwIfAborted: (label: string) => void;
 }
 
-export function startTimeout(ms: number = MODEL_TIMEOUT_MS): TimeoutScope {
+export function startTimeout(ms: number): TimeoutScope {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), ms);
   if (typeof timer.unref === 'function') timer.unref();

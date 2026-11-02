@@ -2,7 +2,7 @@ import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { moderateChunk, moderationMode } from '../moderation/index';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
-import type { Decision, ModerationLogEntry } from '../moderation/types';
+import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
 import type {
   ChunkMetaMessage,
   ClientRole,
@@ -40,6 +40,7 @@ interface PendingMedia {
 export class StreamHost {
   private buffer: DelayBuffer<Buffer>;
   private readonly decisions = new Map<number, Decision[]>();
+  private readonly chunkDebug = new Map<number, ChunkDebug>();
   private readonly pendingModeration = new Set<number>();
   private readonly viewers = new Set<WebSocket>();
   private readonly startedViewers = new Set<WebSocket>();
@@ -128,6 +129,7 @@ export class StreamHost {
   private resetStream(): void {
     this.buffer.clear();
     this.decisions.clear();
+    this.chunkDebug.clear();
     this.pendingModeration.clear();
     this.forceReleased.clear();
     this.pendingMedia.clear();
@@ -216,6 +218,7 @@ export class StreamHost {
           return;
         }
         this.decisions.set(seq, res.decisions);
+        this.chunkDebug.set(seq, res.debug);
         if (res.transcriptText.trim().length > 0) {
           this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
         }
@@ -225,6 +228,14 @@ export class StreamHost {
           `[cost] chunk #${seq} mode=${res.mode} +$${res.costUsd.toFixed(4)} ` +
             `total=$${this.tracker.totalUsd.toFixed(4)} ~$${hourly.toFixed(2)}/h ` +
             `(cap $${maxSpendUsd()}, ${moderationMode()})`,
+        );
+        console.log(
+          `[debug] chunk #${seq} lang=${res.debug.language} rule=${res.debug.matchedRule ?? 'none'} ` +
+            `voice=${res.debug.timingsMs.voiceMs}ms sam=${res.debug.timingsMs.samMs}ms ` +
+            `judge=${res.debug.timingsMs.judgeMs}ms transcript=${JSON.stringify(res.debug.transcript)}` +
+            (Object.keys(res.debug.errors).length > 0
+              ? ` errors=${JSON.stringify(res.debug.errors)}`
+              : ''),
         );
       })
       .catch(() => {
@@ -277,6 +288,13 @@ export class StreamHost {
           label: 'full frame (max hold exceeded)',
         },
       ]);
+      this.chunkDebug.set(chunk.seq, {
+        transcript: '',
+        language: 'unknown',
+        matchedRule: null,
+        timingsMs: { voiceMs: 0, samMs: 0, judgeMs: 0 },
+        errors: { sam: `max hold exceeded (${this.maxOverdueMs}ms past the delay)` },
+      });
       this.pushLog({ seq: chunk.seq, at: new Date().toISOString(), action: 'bleep', reason });
     }
   }
@@ -288,6 +306,7 @@ export class StreamHost {
     if (due.length === 0) return;
     for (const chunk of due) {
       const decisions = this.decisions.get(chunk.seq) ?? [];
+      const debug = this.chunkDebug.get(chunk.seq);
       for (const ws of [...this.viewers]) {
         if (ws.readyState !== 1) {
           this.viewers.delete(ws);
@@ -295,7 +314,7 @@ export class StreamHost {
           continue;
         }
         const init = !this.startedViewers.has(ws);
-        this.sendChunk(ws, { seq: chunk.seq, data: chunk.data, init, decisions });
+        this.sendChunk(ws, { seq: chunk.seq, data: chunk.data, init, decisions, debug });
         this.startedViewers.add(ws);
       }
     }
@@ -303,7 +322,7 @@ export class StreamHost {
 
   private sendChunk(
     ws: WebSocket,
-    args: { seq: number; data: Buffer; init: boolean; decisions: Decision[] },
+    args: { seq: number; data: Buffer; init: boolean; decisions: Decision[]; debug?: ChunkDebug },
   ): void {
     const meta: ChunkMetaMessage = {
       type: 'chunk',
@@ -311,6 +330,7 @@ export class StreamHost {
       init: args.init,
       decisions: args.decisions,
       receiptTimeMs: Date.now(),
+      ...(args.debug ? { debug: args.debug } : {}),
     };
     ws.send(JSON.stringify(meta));
     ws.send(args.data);

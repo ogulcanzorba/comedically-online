@@ -8,6 +8,9 @@ import {
   RULEBOOK_VERSION,
   RULEBOOK_VERSION_HASH,
   audioBleepRules,
+  audioRuleForTarget,
+  audioRulesMatching,
+  normalizeForMatch,
   videoBlurRules,
 } from '../src/moderation/rulebook';
 import { getAcceptance, hasValidAcceptance, recordAcceptance } from '../src/db/acceptances';
@@ -45,6 +48,39 @@ describe('rulebook loading', () => {
 
   it('has a stable 12-hex revision hash', () => {
     assert.match(RULEBOOK_VERSION_HASH, /^[0-9a-f]{12}$/);
+  });
+
+  it('matches case-insensitively and tolerates punctuation', () => {
+    assert.equal(normalizeForMatch('  WAFFLE! '), 'waffle');
+    for (const text of ['waffle', 'Waffle', 'WAFFLE!', '...waffle...', 'say waffle, please']) {
+      const hits = audioRulesMatching(text);
+      assert.equal(hits.length, 1, text);
+      assert.equal(hits[0].rule.id, 'banned-word-waffle');
+      assert.equal(hits[0].variant, 'waffle');
+    }
+    assert.deepEqual(audioRulesMatching('a clean sentence about breakfast'), []);
+    assert.deepEqual(audioRulesMatching(''), []);
+  });
+
+  it('matches Turkish waffle spellings via aliases', () => {
+    const rule = audioBleepRules()[0];
+    assert.ok(rule.aliases?.includes('vafıl'));
+    assert.ok(rule.aliases?.includes('vaffıl'));
+    for (const [text, variant] of [
+      ['sahnede vafıl hakkında konuştum', 'vafıl'],
+      ['Vaffıl! dedim', 'vaffıl'],
+    ] as Array<[string, string]>) {
+      const hits = audioRulesMatching(text);
+      assert.equal(hits.length, 1, text);
+      assert.equal(hits[0].rule.id, 'banned-word-waffle');
+      assert.equal(hits[0].variant, variant);
+    }
+  });
+
+  it('resolves judge targets to rules through normalization and aliases', () => {
+    assert.equal(audioRuleForTarget('Waffle!')?.id, 'banned-word-waffle');
+    assert.equal(audioRuleForTarget('vafıl')?.id, 'banned-word-waffle');
+    assert.equal(audioRuleForTarget('pancakes'), undefined);
   });
 });
 

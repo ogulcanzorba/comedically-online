@@ -1,7 +1,7 @@
 import type { ModerationMode, TranscriptTurn } from './types';
 import { mockTranscriptFor } from './mock';
 import { PRICING } from './cost';
-import { startTimeout } from './timeout';
+import { startTimeout, voiceTimeoutMs } from './timeout';
 
 const VOICE_URL = 'https://api.meta.ai/v1/asr/transcribe';
 const VOICE_MODEL = 'muse-voice-transcribe-1.0';
@@ -9,11 +9,15 @@ const VOICE_MODEL = 'muse-voice-transcribe-1.0';
 export interface Transcript {
   text: string;
   turns: TranscriptTurn[];
+  /** BCP-47 language tag when the API reports one; otherwise undefined. */
+  language?: string;
 }
 
 interface VoiceResponse {
   transcript?: string;
   audioDurationMs?: number;
+  language?: string;
+  detectedLanguage?: string;
   turns?: Array<{ startMs?: number; endMs?: number; transcript?: string }>;
 }
 
@@ -43,7 +47,7 @@ export async function transcribeChunk(
     }),
   );
   form.append('audio', new Blob([Uint8Array.from(wav)], { type: 'audio/wav' }), 'chunk.wav');
-  const t = startTimeout();
+  const t = startTimeout(voiceTimeoutMs());
   let res: Response;
   try {
     res = await fetch(VOICE_URL, {
@@ -68,5 +72,14 @@ export async function transcribeChunk(
     }));
   const text = typeof body.transcript === 'string' ? body.transcript : turns.map((t) => t.transcript).join(' ');
   const ms = typeof body.audioDurationMs === 'number' ? body.audioDurationMs : 2000;
-  return { transcript: { text, turns }, costUsd: (ms / 3_600_000) * PRICING.voiceTranscribePerHourUsd };
+  const language =
+    typeof body.language === 'string'
+      ? body.language
+      : typeof body.detectedLanguage === 'string'
+        ? body.detectedLanguage
+        : undefined;
+  return {
+    transcript: { text, turns, ...(language ? { language } : {}) },
+    costUsd: (ms / 3_600_000) * PRICING.voiceTranscribePerHourUsd,
+  };
 }

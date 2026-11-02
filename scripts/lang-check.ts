@@ -19,7 +19,7 @@
  */
 import { existsSync, readFileSync } from 'node:fs';
 import { transcribeChunk } from '../src/moderation/transcribe';
-import { audioBleepRules } from '../src/moderation/rulebook';
+import { audioRulesMatching } from '../src/moderation/rulebook';
 
 function argValue(flag: string, fallback: string): string {
   const idx = process.argv.indexOf(flag);
@@ -55,11 +55,9 @@ async function check(label: string, path: string): Promise<boolean> {
   const { transcript, costUsd } = await transcribeChunk(wav, 0, 'live');
   console.log(`transcript: ${JSON.stringify(transcript.text)}`);
   console.log(`turns: ${JSON.stringify(transcript.turns)}`);
-  const matched = audioBleepRules().filter((r) =>
-    transcript.text.toLowerCase().includes(r.match.toLowerCase()),
-  );
+  const matched = audioRulesMatching(transcript.text);
   if (matched.length > 0) {
-    console.log(`RULE MATCH: ${matched.map((r) => `${r.id} ("${r.match}")`).join(', ')}`);
+    console.log(`RULE MATCH: ${matched.map((m) => `${m.rule.id} (via "${m.variant}")`).join(', ')}`);
   } else {
     console.log('RULE MATCH: none — the "waffle" rule did NOT match this clip');
   }

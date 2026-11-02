@@ -1,9 +1,8 @@
 import OpenAI from 'openai';
 import type { ModerationAction, ModerationMode } from './types';
-import { MOCK_BANNED_RULE_ID, MOCK_BANNED_WORD } from './mock';
-import { RULEBOOK_RULES } from './rulebook';
+import { RULEBOOK_RULES, audioRulesMatching } from './rulebook';
 import { PRICING } from './cost';
-import { startTimeout } from './timeout';
+import { sparkTimeoutMs, startTimeout } from './timeout';
 
 const SPARK_MODEL = 'muse-spark-1.3';
 
@@ -28,12 +27,12 @@ export async function judgeContext(
 }
 
 function mockJudge(input: JudgeInput): JudgeVerdict {
-  const hay = input.chunkTranscript.toLowerCase();
-  if (hay.includes(MOCK_BANNED_WORD)) {
+  const hit = audioRulesMatching(input.chunkTranscript)[0];
+  if (hit) {
     return {
       action: 'bleep',
-      reason: `mock: banned word per rule ${MOCK_BANNED_RULE_ID ?? 'rulebook'}`,
-      target: MOCK_BANNED_WORD,
+      reason: `mock: banned word per rule ${hit.rule.id}`,
+      target: hit.variant,
     };
   }
   return { action: 'allow', reason: 'mock: nothing flagged' };
@@ -47,7 +46,7 @@ function requireKey(): string {
 
 async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; costUsd: number }> {
   const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
-  const t = startTimeout();
+  const t = startTimeout(sparkTimeoutMs());
   let res: Awaited<ReturnType<typeof client.chat.completions.create>>;
   try {
     res = await client.chat.completions.create(

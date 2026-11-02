@@ -1,4 +1,4 @@
-import type { Decision, ModerationLogEntry } from '../moderation/types';
+import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
 
 export const WS_PATH = '/ws';
 
@@ -36,6 +36,8 @@ export interface ChunkMetaMessage {
   init: boolean;
   decisions: Decision[];
   receiptTimeMs: number;
+  /** Per-chunk debug detail (transcript, language, rule, timings, errors). Absent for init sends. */
+  debug?: ChunkDebug;
 }
 
 /** Server -> publisher: one moderation log entry per chunk (or rule update). */
