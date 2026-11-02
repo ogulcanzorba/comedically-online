@@ -55,3 +55,9 @@ CREATE TABLE IF NOT EXISTS show_tags(
   PRIMARY KEY(show_id, tag_slug)
 );
 CREATE INDEX IF NOT EXISTS idx_show_tags_tag ON show_tags(tag_slug);
+
+CREATE TABLE IF NOT EXISTS rulebook_acceptances(
+  user_id TEXT PRIMARY KEY REFERENCES users(id),
+  rulebook_hash TEXT NOT NULL,
+  accepted_at TEXT NOT NULL
+);

@@ -68,6 +68,7 @@ export default function StudioPage() {
   const [rules, setRules] = useState(DEFAULT_RULES);
   const [log, setLog] = useState<ModerationLogEntry[]>([]);
   const [error, setError] = useState('');
+  const [needsAcceptance, setNeedsAcceptance] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -163,7 +164,23 @@ export default function StudioPage() {
     const stream = streamRef.current;
     if (!stream || wsRef.current) return;
     setError('');
+    setNeedsAcceptance(null);
+    // Server-side gate: the go-live API refuses without a valid rulebook acceptance.
+    const showId = new URLSearchParams(window.location.search).get('show');
     try {
+      const gate = await fetch('/api/studio/go-live', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ showId }),
+      });
+      if (!gate.ok) {
+        const data = (await gate.json().catch(() => ({}))) as { code?: string; error?: string };
+        if (gate.status === 403 && data.code === 'rulebook-acceptance-required') {
+          setNeedsAcceptance(showId ?? '');
+          return;
+        }
+        throw new Error(data.error ?? 'go-live refused');
+      }
       const ws = new WebSocket(
         `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=publisher`,
       );
@@ -244,6 +261,21 @@ export default function StudioPage() {
       </div>
 
       {error && <p className="mt-4 rounded-md bg-red-500/10 p-3 text-sm text-red-200">{error}</p>}
+      {needsAcceptance !== null && (
+        <p className="mt-4 rounded-md border border-amber-200/40 bg-amber-100/10 p-3 text-sm text-amber-100">
+          Accept the rulebook before going live.{' '}
+          {needsAcceptance ? (
+            <Link href={`/studio/shows/${needsAcceptance}/prepare`} className="underline">
+              Open the pre-live page for this show
+            </Link>
+          ) : (
+            <Link href="/studio/shows" className="underline">
+              Pick a show to prepare
+            </Link>
+          )}
+          .
+        </p>
+      )}
 
       <div className="mt-6 grid gap-6 md:grid-cols-2">
         <section>
