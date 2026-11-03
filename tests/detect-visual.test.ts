@@ -1,12 +1,14 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_FRAMES_PER_CHUNK,
   conceptsFromRulebook,
   debugFramesDir,
   flagsForImageHit,
   framesPerChunk,
   meanConfidence,
   parseSamOutput,
+  sampleTimesMs,
 } from '../src/moderation/detect-visual';
 
 describe('parseSamOutput image shape', () => {
@@ -46,16 +48,32 @@ describe('meanConfidence', () => {
 });
 
 describe('sampling env', () => {
-  it('defaults to 1 frame per chunk, 2 on opt-in', () => {
-    const saved = process.env.SAM_FRAMES_PER_CHUNK;
-    delete process.env.SAM_FRAMES_PER_CHUNK;
-    assert.equal(framesPerChunk(), 1);
-    process.env.SAM_FRAMES_PER_CHUNK = '2';
-    assert.equal(framesPerChunk(), 2);
-    process.env.SAM_FRAMES_PER_CHUNK = '3';
-    assert.equal(framesPerChunk(), 1);
-    if (saved === undefined) delete process.env.SAM_FRAMES_PER_CHUNK;
-    else process.env.SAM_FRAMES_PER_CHUNK = saved;
+  it('defaults to 4 frames per chunk, honors FRAMES_PER_CHUNK 1..8', () => {
+    assert.equal(DEFAULT_FRAMES_PER_CHUNK, 4);
+    const saved = process.env.FRAMES_PER_CHUNK;
+    delete process.env.FRAMES_PER_CHUNK;
+    try {
+      assert.equal(framesPerChunk(), 4);
+      process.env.FRAMES_PER_CHUNK = '2';
+      assert.equal(framesPerChunk(), 2);
+      process.env.FRAMES_PER_CHUNK = '8';
+      assert.equal(framesPerChunk(), 8);
+      process.env.FRAMES_PER_CHUNK = '0';
+      assert.equal(framesPerChunk(), 4);
+      process.env.FRAMES_PER_CHUNK = '9';
+      assert.equal(framesPerChunk(), 4);
+      process.env.FRAMES_PER_CHUNK = 'junk';
+      assert.equal(framesPerChunk(), 4);
+    } finally {
+      if (saved === undefined) delete process.env.FRAMES_PER_CHUNK;
+      else process.env.FRAMES_PER_CHUNK = saved;
+    }
+  });
+
+  it('spaces sample times evenly across the 2s chunk', () => {
+    assert.deepEqual(sampleTimesMs(4), [250, 750, 1250, 1750]);
+    assert.deepEqual(sampleTimesMs(1), [1000]);
+    assert.deepEqual(sampleTimesMs(2), [500, 1500]);
   });
 
   it('exposes the debug frames dir only on opt-in', () => {

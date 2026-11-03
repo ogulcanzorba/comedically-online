@@ -79,11 +79,16 @@ async function main(): Promise<void> {
     const release = await pool.acquire();
     const started = Date.now();
     try {
+      const frameFiles = row.hasJpg
+        ? readdirSync(dir)
+            .filter((f) => f.startsWith(`chunk${row.seq}-f`) && f.endsWith('.jpg'))
+            .sort()
+        : [];
       const res = await moderateChunk({
         seq: row.seq,
         video: readFileSync(join(dir, `chunk${row.seq}.webm`)),
         wav: row.hasWav ? readFileSync(join(dir, `chunk${row.seq}.wav`)) : null,
-        frameJpg: row.hasJpg ? readFileSync(join(dir, `chunk${row.seq}.jpg`)) : null,
+        frameJpgs: frameFiles.map((f) => readFileSync(join(dir, f))),
         recentTranscript: recent,
         tracker,
         receivedAtMs: started,

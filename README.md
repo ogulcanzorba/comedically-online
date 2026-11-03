@@ -35,7 +35,8 @@ npm run dev            # http://localhost:3000
 | `SAM_IMAGE_TIMEOUT_MS` | `6000` | SAM image calls: no retries, fail closed fast. |
 | `MOD_POOL` | `8` | Chunks moderating at once. |
 | `VISUAL_FAIL_MODE` | `closed` | `open` releases failed visuals unblurred with a warning (demo testing). |
-| `SAM_FRAMES_PER_CHUNK` | `1` | `2` samples t≈0.5s/1.5s for briefer gestures (2x image cost, same wall time). |
+| `FRAMES_PER_CHUNK` / `NEXT_PUBLIC_FRAMES_PER_CHUNK` | `4` / `4` | Frames sampled per chunk (must match); linear image cost, flat wall time. |
+| `BLUR_PAD_CHUNKS` | `1` | Neighbor chunks blurred around a flagged chunk (`0` disables). |
 | `DEBUG_FRAMES` | off | `1` saves sampled JPEGs to `debug-frames/` (gitignored) with per-concept `[sam]` logs. |
 | `DEBUG_CAPTURE` / `CHUNKS_DIR` | off / `/tmp/chunks` | `1` saves moderation inputs for `npm run soak:live` replay. |
 

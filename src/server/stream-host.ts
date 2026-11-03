@@ -6,6 +6,7 @@ import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { Semaphore } from '../lib/semaphore';
 import { moderateChunk, moderationMode } from '../moderation/index';
+import { ruleById } from '../moderation/rulebook';
 import { ffmpegActiveChildren, preassembleChunk } from '../moderation/transcode';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
 import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
@@ -50,6 +51,36 @@ export function maxConcurrent(): number {
   return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_CONCURRENT;
 }
 
+/** Default safety-margin blur span around a flagged chunk (±chunks). */
+export const DEFAULT_BLUR_PAD_CHUNKS = 1;
+
+/** Overridable via BLUR_PAD_CHUNKS (0 disables the safety margin). */
+export function blurPadChunks(): number {
+  const raw = Number(process.env.BLUR_PAD_CHUNKS ?? DEFAULT_BLUR_PAD_CHUNKS);
+  return Number.isInteger(raw) && raw >= 0 ? raw : DEFAULT_BLUR_PAD_CHUNKS;
+}
+
+/** Label marking safety-margin decisions (also the dedupe key with ruleId). */
+const PAD_LABEL = 'safety margin';
+
+const FULL_FRAME = { x: 0, y: 0, w: 1, h: 1 } as const;
+
+function padBlurDecision(ruleId: string, fromSeq: number): Decision {
+  const rule = ruleById(ruleId);
+  return {
+    action: 'blur',
+    reason: rule
+      ? `rule ${rule.id}: safety margin for ${rule.title} (flagged at chunk #${fromSeq})`
+      : 'safety margin blur',
+    startMs: 0,
+    endMs: 2000,
+    box: { ...FULL_FRAME },
+    label: PAD_LABEL,
+    ruleId,
+    ...(rule ? { explanation: rule.explanation } : {}),
+  };
+}
+
 /**
  * Chunk capture dir for DEBUG_CAPTURE=1 (replayed by `npm run soak:live`).
  * CHUNKS_DIR overrides the default /tmp/chunks (tests use a temp dir).
@@ -65,7 +96,7 @@ const STATS_INTERVAL_MS = 5_000;
 interface PendingMedia {
   webm: { data: Buffer; receiptTimeMs: number } | null;
   wav: Buffer | null;
-  jpg: Buffer | null;
+  jpg: Buffer[];
   serverSeq: number | null;
   studioSeq: number;
   timer: NodeJS.Timeout | null;
@@ -90,6 +121,8 @@ export class StreamHost {
   private endAnnounced = false;
   private readonly endedViewers = new Set<WebSocket>();
   private lastDrainSent = -1;
+  /** Safety-margin blurs owed to chunks not yet stored (seq -> pads). */
+  private readonly padOwed = new Map<number, Array<{ ruleId: string; fromSeq: number }>>();
   private readonly forceReleased = new Set<number>();
   /** Studio seqs whose moderation already started (labels late/orphaned wavs). */
   private readonly startedStudio = new Set<number>();
@@ -217,6 +250,7 @@ export class StreamHost {
     this.endAnnounced = false;
     this.endedViewers.clear();
     this.lastDrainSent = -1;
+    this.padOwed.clear();
     this.buffer.clear();
     this.decisions.clear();
     this.chunkDebug.clear();
@@ -277,7 +311,7 @@ export class StreamHost {
       pending = {
         webm: null,
         wav: null,
-        jpg: null,
+        jpg: [],
         serverSeq: null,
         studioSeq,
         timer: null,
@@ -294,13 +328,15 @@ export class StreamHost {
           : 'early';
       console.log(`[rx] wav studio=${studioSeq} (${state}, ${data.length}B)`);
     } else if (kind === 'jpg') {
-      pending.jpg = data;
+      pending.jpg.push(data);
       const state = this.startedStudio.has(studioSeq)
         ? 'late-orphan'
         : pending.webm
           ? 'paired'
           : 'early';
-      console.log(`[rx] jpg studio=${studioSeq} (${state}, ${data.length}B)`);
+      console.log(
+        `[rx] jpg studio=${studioSeq} frame#${pending.jpg.length} (${state}, ${data.length}B)`,
+      );
     } else {
       const serverSeq = this.nextSeq;
       this.nextSeq += 1;
@@ -335,9 +371,9 @@ export class StreamHost {
     // Playback still uses the original WebM bytes from the delay buffer.
     const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
-    const frameJpg = pending.jpg;
+    const frameJpgs = pending.jpg;
     const receiptTimeMs = pending.webm.receiptTimeMs;
-    this.captureChunk(seq, video, wav, frameJpg, receiptTimeMs);
+    this.captureChunk(seq, video, wav, frameJpgs, receiptTimeMs);
     const recentTranscript = this.recentTranscript();
     // Bounded pool: at most poolMax chunks moderate at once, so a pileup
     // queues instead of stampeding the model APIs. Release order still
@@ -358,7 +394,7 @@ export class StreamHost {
         seq,
         video,
         wav,
-        frameJpg,
+        frameJpgs,
         receivedAtMs: receiptTimeMs,
         recentTranscript,
         tracker: this.tracker,
@@ -380,7 +416,26 @@ export class StreamHost {
             );
             return;
           }
-          this.decisions.set(seq, res.decisions);
+          const stored = [...res.decisions, ...this.takeOwedPads(seq)];
+          // Only direct rule hits cast a margin: owed pads never cascade.
+          const directFlags = [
+            ...new Set(
+              res.decisions
+                .filter((d) => d.action === 'blur' && d.ruleId)
+                .map((d) => d.ruleId as string),
+            ),
+          ];
+          const pad = blurPadChunks();
+          if (directFlags.length > 0 && pad > 0) {
+            for (const ruleId of directFlags) {
+              for (let d = 1; d <= pad; d++) {
+                this.applyPad(seq - d, ruleId, seq);
+                this.applyPad(seq + d, ruleId, seq);
+              }
+            }
+            res.entry.reason += ` (whole-frame blur, safety margin ±${pad} chunk${pad === 1 ? '' : 's'})`;
+          }
+          this.decisions.set(seq, stored);
           this.chunkDebug.set(seq, res.debug);
           if (res.transcriptText.trim().length > 0) {
             this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
@@ -423,12 +478,57 @@ export class StreamHost {
     });
   }
 
+  /** Seqs currently held in the delay buffer (unreleased to viewers). */
+  private bufferedSeqs(): Set<number> {
+    return new Set(this.buffer.snapshot().map((c) => c.seq));
+  }
+
+  /** Take owed safety-margin blurs for a chunk being stored; prune stale keys. */
+  private takeOwedPads(seq: number): Decision[] {
+    const out: Decision[] = [];
+    for (const [s, pads] of [...this.padOwed]) {
+      if (s > seq) continue;
+      this.padOwed.delete(s);
+      if (s === seq) {
+        for (const p of pads) out.push(padBlurDecision(p.ruleId, p.fromSeq));
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Blur a chunk neighboring a flagged one. Stored + still held: append
+   * now. Future or still moderating: owe it for store time (deduped per
+   * rule). Already released: too late (force-released ones blur anyway).
+   */
+  private applyPad(victimSeq: number, ruleId: string, fromSeq: number): void {
+    if (victimSeq < 0 || this.forceReleased.has(victimSeq)) return;
+    const stored = this.decisions.get(victimSeq);
+    if (stored) {
+      if (!this.bufferedSeqs().has(victimSeq)) return;
+      if (stored.some((d) => d.action === 'blur' && d.ruleId === ruleId && d.label === PAD_LABEL)) {
+        return;
+      }
+      stored.push(padBlurDecision(ruleId, fromSeq));
+      return;
+    }
+    if (
+      victimSeq >= this.nextSeq ||
+      this.bufferedSeqs().has(victimSeq) ||
+      this.pendingModeration.has(victimSeq)
+    ) {
+      const owed = this.padOwed.get(victimSeq) ?? [];
+      if (!owed.some((p) => p.ruleId === ruleId)) owed.push({ ruleId, fromSeq });
+      this.padOwed.set(victimSeq, owed);
+    }
+  }
+
   /** DEBUG_CAPTURE=1: persist the exact moderation inputs for soak:live replay. */
   private captureChunk(
     seq: number,
     video: Buffer,
     wav: Buffer | null,
-    frameJpg: Buffer | null,
+    frameJpgs: Buffer[],
     receiptTimeMs: number,
   ): void {
     const dir = captureDir();
@@ -437,14 +537,14 @@ export class StreamHost {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `chunk${seq}.webm`), video);
       if (wav) writeFileSync(join(dir, `chunk${seq}.wav`), wav);
-      if (frameJpg) writeFileSync(join(dir, `chunk${seq}.jpg`), frameJpg);
+      frameJpgs.forEach((jpg, i) => writeFileSync(join(dir, `chunk${seq}-f${i}.jpg`), jpg));
       appendFileSync(
         join(dir, 'manifest.jsonl'),
         JSON.stringify({
           seq,
           receivedAtMs: receiptTimeMs,
           hasWav: !!wav,
-          hasJpg: !!frameJpg,
+          hasJpg: frameJpgs.length > 0,
         }) + '\n',
       );
     } catch (e) {
@@ -490,6 +590,7 @@ export class StreamHost {
       if (!this.pendingModeration.has(chunk.seq)) continue;
       if (nowMs - chunk.receiptTimeMs <= this.buffer.delay + this.maxOverdueMs) continue;
       this.pendingModeration.delete(chunk.seq);
+      this.padOwed.delete(chunk.seq); // force-release blurs in full already
       this.forceReleased.add(chunk.seq);
       const reason =
         `moderation unavailable: unmoderated ${this.maxOverdueMs}ms past the delay; ` +

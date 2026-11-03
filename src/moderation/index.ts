@@ -22,8 +22,8 @@ export interface ModerateArgs {
   seq: number;
   video: Buffer | null;
   wav: Buffer | null;
-  /** Studio canvas capture (~t=1.0s); skips server ffmpeg when present. */
-  frameJpg?: Buffer | null;
+  /** Studio canvas captures; skips server ffmpeg when any arrive. */
+  frameJpgs?: Buffer[];
   recentTranscript: string;
   tracker: SpendTracker;
   /** Server receipt time (Date.now()) for queue-wait measurement. Omit when unknown. */
@@ -130,7 +130,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   }> {
     const start = Date.now();
     try {
-      const v = await detectVisual(args.video, args.seq, mode, args.frameJpg ?? null);
+      const v = await detectVisual(args.video, args.seq, mode, args.frameJpgs ?? []);
       return {
         flags: v.flags,
         costUsd: v.costUsd,
@@ -176,14 +176,16 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       });
     }
   }
+  // Any video-rule flag censors the whole frame for the whole chunk: no
+  // regional boxes. Boundary straddles are covered by BLUR_PAD_CHUNKS.
   for (const flag of det.flags) {
     const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
     decisions.push({
       action: 'blur' as const,
       reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`,
-      startMs: flag.startMs,
-      endMs: flag.endMs,
-      box: flag.box,
+      startMs: 0,
+      endMs: 2000,
+      box: { x: 0, y: 0, w: 1, h: 1 },
       label: flag.label,
       ...(flag.ruleId ? { ruleId: flag.ruleId } : {}),
       ...(rule ? { explanation: rule.explanation } : {}),

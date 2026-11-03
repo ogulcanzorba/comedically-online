@@ -77,6 +77,16 @@ function formatScene(seq: number): string {
  * the timeline come from the relay's publisher log channel (near real time);
  * the log below shows the same moments as they air on the 12s delay.
  */
+/**
+ * Canvas frames grabbed per 2s chunk. Must match the server FRAMES_PER_CHUNK;
+ * baked at build (dev-server restart picks up .env changes).
+ */
+function studioFrames(): number {
+  const raw = Number(process.env.NEXT_PUBLIC_FRAMES_PER_CHUNK ?? 4);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 8 ? raw : 4;
+}
+const STUDIO_FRAMES = studioFrames();
+
 export function BroadcastStudio({ showId, accepted }: { showId: string; accepted: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -86,7 +96,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const liveSinceRef = useRef(0);
   const sendChainRef = useRef(Promise.resolve());
   const toastTimerRef = useRef<number | null>(null);
-  const frameTimerRef = useRef<number | null>(null);
+  const frameTimerRef = useRef<number[]>([]);
   const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
   const finishTimerRef = useRef<number | null>(null);
   const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'finishing' | 'ended'>('idle');
@@ -123,7 +133,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
       wsRef.current?.close();
       wsRef.current = null;
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
-      if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
+      for (const t of frameTimerRef.current) window.clearTimeout(t);
       if (finishTimerRef.current !== null) window.clearTimeout(finishTimerRef.current);
     };
   }, []);
@@ -192,7 +202,6 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
 
   /** Mid-chunk canvas grab (320px JPEG) so server ffmpeg stays out of the hot path. */
   function captureFrame(seq: number): void {
-    frameTimerRef.current = null;
     const video = videoRef.current;
     const sock = wsRef.current;
     if (!video || !sock || sock.readyState !== WebSocket.OPEN) return;
@@ -220,8 +229,11 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   }
 
   function scheduleFrameCapture(seq: number): void {
-    if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
-    frameTimerRef.current = window.setTimeout(() => captureFrame(seq), 1000);
+    for (const t of frameTimerRef.current) window.clearTimeout(t);
+    // N evenly spaced grabs: (i+0.5)*2/N seconds into the chunk.
+    frameTimerRef.current = Array.from({ length: STUDIO_FRAMES }, (_, i) =>
+      window.setTimeout(() => captureFrame(seq), ((i + 0.5) * 2000) / STUDIO_FRAMES),
+    );
   }
 
   /** True finish: socket closed only after the server played out the drain. */
@@ -343,8 +355,8 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   function endBroadcast(): void {
     recorderRef.current?.stop();
     recorderRef.current = null;
-    if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
-    frameTimerRef.current = null;
+    for (const t of frameTimerRef.current) window.clearTimeout(t);
+    frameTimerRef.current = [];
     // Keep the socket open: the server drains the delay buffer for viewers
     // (still watching behind us) and tells us when moderation is complete.
     const sock = wsRef.current;

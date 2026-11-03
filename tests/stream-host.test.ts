@@ -6,9 +6,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WebSocket } from 'ws';
 import {
+  DEFAULT_BLUR_PAD_CHUNKS,
   DEFAULT_MAX_CONCURRENT,
   DEFAULT_MAX_OVERDUE_MS,
   StreamHost,
+  blurPadChunks,
   captureDir,
   maxConcurrent,
   maxHoldMs,
@@ -78,6 +80,124 @@ describe('maxConcurrent', () => {
   });
 });
 
+describe('blurPadChunks', () => {
+  it('defaults to 1 and honors BLUR_PAD_CHUNKS', () => {
+    assert.equal(DEFAULT_BLUR_PAD_CHUNKS, 1);
+    const saved = process.env.BLUR_PAD_CHUNKS;
+    delete process.env.BLUR_PAD_CHUNKS;
+    try {
+      assert.equal(blurPadChunks(), 1);
+      process.env.BLUR_PAD_CHUNKS = '0';
+      assert.equal(blurPadChunks(), 0);
+      process.env.BLUR_PAD_CHUNKS = '2';
+      assert.equal(blurPadChunks(), 2);
+      process.env.BLUR_PAD_CHUNKS = '-1';
+      assert.equal(blurPadChunks(), 1);
+      process.env.BLUR_PAD_CHUNKS = 'junk';
+      assert.equal(blurPadChunks(), 1);
+    } finally {
+      if (saved === undefined) delete process.env.BLUR_PAD_CHUNKS;
+      else process.env.BLUR_PAD_CHUNKS = saved;
+    }
+  });
+});
+
+describe('safety-margin blur padding', () => {
+  function strings(sent: unknown[]): Array<Record<string, unknown>> {
+    return sent
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+  }
+
+  function publishPair(pub: { emit: (e: string, ...a: unknown[]) => void }, seq: number): void {
+    pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq }), false);
+    pub.emit('message', Buffer.from(`webm-${seq}`), true);
+    pub.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq }), false);
+    pub.emit('message', Buffer.from(`wav-${seq}`), true);
+  }
+
+  it('pads the chunks around a flagged chunk with whole-frame blurs', async () => {
+    const saved = process.env.BLUR_PAD_CHUNKS;
+    delete process.env.BLUR_PAD_CHUNKS;
+    const viewerSent: unknown[] = [];
+    const pubSent: unknown[] = [];
+    try {
+      await capture(async () => {
+        const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+        try {
+          const pub = fakeSocket(pubSent);
+          host.handleConnection(pub, 'publisher');
+          host.handleConnection(fakeSocket(viewerSent), 'viewer');
+          // Server seqs 0..3; mock slot 3 flags a video rule on server seq 3.
+          for (const s of [0, 1, 2, 3]) publishPair(pub, s);
+          await sleep(300);
+        } finally {
+          host.close();
+        }
+      });
+    } finally {
+      if (saved === undefined) delete process.env.BLUR_PAD_CHUNKS;
+      else process.env.BLUR_PAD_CHUNKS = saved;
+    }
+    const metas = strings(viewerSent).filter((m) => m.type === 'chunk') as Array<{
+      seq: number;
+      decisions: Array<Record<string, unknown>>;
+    }>;
+    const bySeq = new Map(metas.map((m) => [m.seq, m.decisions]));
+    // Flagging chunk keeps its direct whole-frame blur.
+    const direct = (bySeq.get(3) ?? []).filter((d) => d.action === 'blur');
+    assert.equal(direct.length, 1);
+    assert.deepEqual(direct[0].box, { x: 0, y: 0, w: 1, h: 1 });
+    assert.ok(direct[0].ruleId, 'direct flag keeps its rule id');
+    // Previous chunk carries the safety-margin pad.
+    const pads = (bySeq.get(2) ?? []).filter((d) => d.label === 'safety margin');
+    assert.equal(pads.length, 1);
+    assert.deepEqual(pads[0].box, { x: 0, y: 0, w: 1, h: 1 });
+    assert.match(String(pads[0].reason), /safety margin for .* \(flagged at chunk #3\)/);
+    assert.equal(pads[0].ruleId, direct[0].ruleId);
+    // Chunks outside the margin stay clean.
+    assert.deepEqual(bySeq.get(0) ?? [], []);
+    assert.deepEqual(bySeq.get(1) ?? [], []);
+    // The flagging chunk's log entry notes the margin.
+    const entries = strings(pubSent).filter((m) => m.type === 'log') as Array<{
+      entry: { seq: number; reason: string };
+    }>;
+    const flagged = entries.find((m) => m.entry.seq === 3);
+    assert.match(flagged?.entry.reason ?? '', /safety margin ±1 chunk/);
+  });
+
+  it('pads nothing with BLUR_PAD_CHUNKS=0', async () => {
+    const saved = process.env.BLUR_PAD_CHUNKS;
+    process.env.BLUR_PAD_CHUNKS = '0';
+    const viewerSent: unknown[] = [];
+    try {
+      await capture(async () => {
+        const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+        try {
+          const pub = fakeSocket([]);
+          host.handleConnection(pub, 'publisher');
+          host.handleConnection(fakeSocket(viewerSent), 'viewer');
+          for (const s of [0, 1, 2, 3]) publishPair(pub, s);
+          await sleep(300);
+        } finally {
+          host.close();
+        }
+      });
+    } finally {
+      if (saved === undefined) delete process.env.BLUR_PAD_CHUNKS;
+      else process.env.BLUR_PAD_CHUNKS = saved;
+    }
+    const metas = strings(viewerSent).filter((m) => m.type === 'chunk') as Array<{
+      seq: number;
+      decisions: Array<Record<string, unknown>>;
+    }>;
+    const bySeq = new Map(metas.map((m) => [m.seq, m.decisions]));
+    // (Server seq 2 keeps its audio bleep; only blur pads are disabled.)
+    assert.equal((bySeq.get(2) ?? []).filter((d) => d.action === 'blur').length, 0);
+    assert.equal((bySeq.get(3) ?? []).filter((d) => d.action === 'blur').length, 1);
+  });
+});
+
 describe('jpg frame pairing', () => {
   it('accepts studio canvas frames and logs their pairing state', async () => {
     const lines = await capture(async () => {
@@ -95,7 +215,7 @@ describe('jpg frame pairing', () => {
       }
     });
     assert.ok(
-      lines.some((l) => l.includes('[rx] jpg studio=0 (early')),
+      lines.some((l) => l.includes('[rx] jpg studio=0 frame#1 (early')),
       'jpg arriving before its webm logs as early',
     );
     assert.ok(
@@ -139,8 +259,10 @@ describe('DEBUG_CAPTURE', () => {
         try {
           const pub = fakeSocket([]);
           host.handleConnection(pub, 'publisher');
-          pub.emit('message', JSON.stringify({ type: 'media', kind: 'jpg', seq: 0 }), false);
-          pub.emit('message', Buffer.from('jpg-bytes'), true);
+          for (const tag of ['jpg-0', 'jpg-1']) {
+            pub.emit('message', JSON.stringify({ type: 'media', kind: 'jpg', seq: 0 }), false);
+            pub.emit('message', Buffer.from(tag), true);
+          }
           pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
           pub.emit('message', Buffer.from('webm-bytes'), true);
           pub.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq: 0 }), false);
@@ -151,14 +273,16 @@ describe('DEBUG_CAPTURE', () => {
         }
       });
       assert.deepEqual(readdirSync(dir).sort(), [
-        'chunk0.jpg',
+        'chunk0-f0.jpg',
+        'chunk0-f1.jpg',
         'chunk0.wav',
         'chunk0.webm',
         'manifest.jsonl',
       ]);
       assert.equal(readFileSync(join(dir, 'chunk0.webm'), 'utf8'), 'webm-bytes');
       assert.equal(readFileSync(join(dir, 'chunk0.wav'), 'utf8'), 'wav-bytes');
-      assert.equal(readFileSync(join(dir, 'chunk0.jpg'), 'utf8'), 'jpg-bytes');
+      assert.equal(readFileSync(join(dir, 'chunk0-f0.jpg'), 'utf8'), 'jpg-0');
+      assert.equal(readFileSync(join(dir, 'chunk0-f1.jpg'), 'utf8'), 'jpg-1');
       const row = JSON.parse(readFileSync(join(dir, 'manifest.jsonl'), 'utf8').trim()) as {
         seq: number;
         receivedAtMs: number;

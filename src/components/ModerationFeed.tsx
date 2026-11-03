@@ -100,8 +100,26 @@ function useModerationFeed(showSlug: string): { events: FeedEvent[]; clear: () =
           ...(pending.debug ? { debug: pending.debug } : {}),
         };
         setEvents((prev) => {
-          if (prev.some((e) => e.seq === evt.seq)) return prev;
-          const next = [...prev, evt].slice(-200);
+          const known = (d: Decision) => `${d.action}|${d.ruleId ?? ''}|${d.startMs}|${d.endMs}`;
+          if (!prev.some((e) => e.seq === evt.seq)) {
+            const next = [...prev, evt].slice(-200);
+            save(showSlug, next);
+            return next;
+          }
+          // Same chunk re-reported (e.g. a safety-margin pad landed after its
+          // own decisions): merge new decisions instead of dropping them.
+          const next = prev.map((e) => {
+            if (e.seq !== evt.seq) return e;
+            const seen = new Set(e.decisions.map(known));
+            const merged = [...e.decisions];
+            for (const d of evt.decisions) {
+              if (!seen.has(known(d))) {
+                seen.add(known(d));
+                merged.push(d);
+              }
+            }
+            return { ...e, decisions: merged };
+          });
           save(showSlug, next);
           return next;
         });
@@ -158,7 +176,7 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
                   {' '}· {c.ruleId}: {c.boxes} boxes
                   {c.confidence !== null ? ` (conf ${c.confidence.toFixed(2)})` : ''} ttfb{' '}
                   {c.ttfbMs}ms/{c.ms}ms x{c.attempts}
-                  {c.confirmMs !== null ? ` +confirm ${c.confirmMs}ms` : ''}
+                  {c.failedFrames > 0 ? ` failed=${c.failedFrames}` : ''}
                 </span>
               ))}
             </dd>

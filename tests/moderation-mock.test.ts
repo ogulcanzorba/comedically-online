@@ -47,6 +47,17 @@ describe('moderation mock mode', () => {
     assert.equal(flagged.debug.matchedRule, 'banned-word-waffle');
   });
 
+  it('censors a flagged chunk whole-frame for the whole chunk', async () => {
+    const res = await runMock(3); // seq%6==3 carries a video-rule flag
+    const blurs = res.decisions.filter((d) => d.action === 'blur');
+    assert.equal(blurs.length, 1);
+    assert.deepEqual(blurs[0].box, { x: 0, y: 0, w: 1, h: 1 });
+    assert.equal(blurs[0].startMs, 0);
+    assert.equal(blurs[0].endMs, 2000);
+    assert.ok(blurs[0].ruleId, 'rule id kept for the log');
+    assert.equal(res.entry.action, 'blur');
+  });
+
   it('measures queue wait from server receipt', async () => {
     const res = await moderateChunk({
       seq: 1,

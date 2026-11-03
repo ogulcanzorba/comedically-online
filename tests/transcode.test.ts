@@ -86,7 +86,7 @@ describe('webmToMp4', () => {
     await assert.rejects(webmToMp4(Buffer.from('x'), null), /no ffmpeg available/);
   });
 
-  it('honors the width override for the confirm call', async () => {
+  it('honors the width override', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
     await webmToMp4(Buffer.from('WEBMBYTES'), shim(dir, 'ok'), 320);
     const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
@@ -179,6 +179,15 @@ describe('extractSampleJpegs', () => {
     assert.equal(out.length, 2);
     assert.ok(out[0].includes('F2'), `first: ${out[0].toString()}`);
     assert.ok(out[1].includes('F6'), `second: ${out[1].toString()}`);
+  });
+
+  it('samples evenly spaced frames for count 4', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const out = await extractSampleJpegs(Buffer.from('WEBMBYTES'), 4, jpegShim(dir, eight));
+    assert.deepEqual(
+      out.map((b) => b.toString().replace(/[^F0-7]/g, '')),
+      ['F1', 'F3', 'F5', 'F7'],
+    );
   });
 
   it('rejects when the window decodes to zero frames', async () => {

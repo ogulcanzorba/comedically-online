@@ -178,13 +178,14 @@ export async function extractMiddleJpeg(webm: Buffer, ffmpeg = resolveFfmpeg()):
 }
 
 /**
- * Sample one (middle, t≈1.0s) or two (quartiles, t≈0.5s/1.5s) 320px JPEGs
- * from one 2s window. Two frames catch briefer gestures at twice the image
- * cost; wall latency stays flat since all concept calls run in parallel.
+ * Sample `count` evenly spaced 320px JPEGs from one 2s window (fraction
+ * (i+0.5)/count, mirroring the browser's capture times). More frames catch
+ * briefer gestures at linear image cost; wall latency stays flat since all
+ * concept calls run in parallel.
  */
 export async function extractSampleJpegs(
   webm: Buffer,
-  count: 1 | 2,
+  count: number,
   ffmpeg = resolveFfmpeg(),
 ): Promise<Buffer[]> {
   const bin = ffmpeg;
@@ -193,6 +194,10 @@ export async function extractSampleJpegs(
   if (frames.length === 0) {
     throw new Error('ffmpeg jpeg extract failed: window decoded to zero frames');
   }
-  if (count === 1) return [frames[Math.floor(frames.length / 2)]];
-  return [frames[Math.floor(frames.length / 4)], frames[Math.floor((frames.length * 3) / 4)]];
+  const n = Math.max(1, Math.min(8, Math.floor(count) || 1));
+  const out: Buffer[] = [];
+  for (let i = 0; i < n; i++) {
+    out.push(frames[Math.min(frames.length - 1, Math.floor((frames.length * (i + 0.5)) / n))]);
+  }
+  return out;
 }

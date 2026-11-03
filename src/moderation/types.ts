@@ -84,7 +84,7 @@ export interface ChunkDebug {
 /** One concept's SAM image result inside a chunk. */
 export interface SamConceptDebug {
   ruleId: string;
-  /** Sampled frames the concept ran on (1, or 2 with SAM_FRAMES_PER_CHUNK=2). */
+  /** Sampled frames the concept ran on (FRAMES_PER_CHUNK, default 4). */
   frames: number;
   boxes: number;
   /** Mean box confidence when the model reports it, else null. */
@@ -92,12 +92,10 @@ export interface SamConceptDebug {
   /** Time to first response token (server queue + compute + network). */
   ttfbMs: number;
   ms: number;
-  /** HTTP attempts behind this concept (SDK retries on 408/409/429/5xx). */
+  /** HTTP attempts behind this concept (image calls never retry: attempts == calls). */
   attempts: number;
-  /** True when a video confirm call refined this concept's flags. */
-  confirmed: boolean;
-  /** Confirm video call duration, when one ran. */
-  confirmMs: number | null;
+  /** Frames whose call failed (a hit on any surviving frame still flags). */
+  failedFrames: number;
 }
 
 /** Where one chunk's visual time went: JPEG extract plus per-concept calls. */
