@@ -66,6 +66,15 @@ export function fuzzyThreshold(normalizedBanned: string): number {
   return normalizedBanned.length <= 5 ? 1 : 2;
 }
 
+/**
+ * Near-exact variants (one typo/transcription wobble) skip the judge and
+ * bleep at once; only distance 2+ pays for a verdict. Plurals and suffix
+ * inflections are already exact, never fuzzy.
+ */
+export function isNearExact(distance: number): boolean {
+  return distance <= 1;
+}
+
 export interface BannedSpelling {
   ruleId: string;
   /** Canonical match or alias, raw (normalized internally). */

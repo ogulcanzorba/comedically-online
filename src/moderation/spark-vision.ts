@@ -182,12 +182,18 @@ export function decideVision(
   return { decision: 'clean', topRuleId: null, maxConfidence };
 }
 
-/** Hysteresis: after a hit, the next two chunks blur even when clean. */
+/** Hysteresis: after a hit, the next N clean chunks blur even when clean. */
 export interface HysteresisState {
   armed: boolean;
   /** Consecutive clean chunks since the last hit (while armed). */
   cleanStreak: number;
   lastRuleId: string | null;
+}
+
+/** Clean chunks blurred past each hit (frame-accurate ranges need less cover). */
+export function hysteresisHold(): number {
+  const raw = Number(process.env.HYSTERESIS_CHUNKS ?? 1);
+  return Number.isInteger(raw) && raw >= 0 && raw <= 4 ? raw : 1;
 }
 
 export function initialHysteresis(): HysteresisState {
@@ -196,23 +202,58 @@ export function initialHysteresis(): HysteresisState {
 
 /**
  * Fold one chunk's vision verdict into the hysteresis state. A hit arms (and
- * blurs); while armed the first two consecutive clean chunks still blur, the
- * third disarms. Returns whether this chunk must blur plus the next state.
+ * blurs); while armed the first `hold` consecutive clean chunks still blur,
+ * then disarms. Returns whether this chunk must blur plus the next state.
  */
 export function hysteresisNext(
   state: HysteresisState,
   hit: boolean,
   ruleId: string | null,
+  hold: number = hysteresisHold(),
 ): { blur: boolean; state: HysteresisState } {
   if (hit) {
     return { blur: true, state: { armed: true, cleanStreak: 0, lastRuleId: ruleId } };
   }
   if (!state.armed) return { blur: false, state };
   const cleanStreak = state.cleanStreak + 1;
-  if (cleanStreak <= 2) {
+  if (cleanStreak <= Math.max(0, hold)) {
     return { blur: true, state: { ...state, cleanStreak } };
   }
   return { blur: false, state: { armed: false, cleanStreak: 0, lastRuleId: null } };
+}
+
+/** Chunk-relative sample times for evenly spaced frames (mirrors detect-visual). */
+function frameTimesMs(count: number): number[] {
+  const n = Math.max(1, Math.floor(count) || 1);
+  return Array.from({ length: n }, (_, i) => ((i + 0.5) * CHUNK_MS) / n);
+}
+
+/** Margin around the first/last positive frame for the blur range. */
+export const VISION_RANGE_MARGIN_MS = 250;
+
+/**
+ * Blur range from positive frame indices: first positive frame minus margin
+ * to last positive frame plus margin, clamped to the chunk. Previous-chunk
+ * frames are context only — when nothing in THIS chunk is positive, only a
+ * head sliver blurs (a gesture continuing over the boundary).
+ */
+export function visionBlurRange(
+  frameIndices: number[],
+  prevCount: number,
+  currentCount: number,
+  marginMs: number = VISION_RANGE_MARGIN_MS,
+): { startMs: number; endMs: number } {
+  const times = frameTimesMs(Math.max(1, currentCount));
+  const current = frameIndices
+    .filter((i) => i >= prevCount)
+    .map((i) => times[Math.min(times.length - 1, i - prevCount)]);
+  if (current.length === 0) {
+    return { startMs: 0, endMs: Math.min(CHUNK_MS, marginMs) };
+  }
+  return {
+    startMs: Math.max(0, Math.round(Math.min(...current) - marginMs)),
+    endMs: Math.min(CHUNK_MS, Math.round(Math.max(...current) + marginMs)),
+  };
 }
 
 function requireKey(): string {
@@ -284,6 +325,11 @@ async function classifyOnce(
       if (attempt === 0 && isRetryable(e) && Date.now() - t0 + RETRY_WAIT_MS < timeoutMs) {
         await sleep(RETRY_WAIT_MS);
         continue;
+      }
+      // Name aborted calls so logs never again read as the old SAM path.
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/abort/i.test(msg)) {
+        throw new Error(`vision ${model} ${effort} aborted after ${timeoutMs}ms`);
       }
       throw e;
     } finally {
@@ -380,12 +426,14 @@ export async function runSparkVision(
     for (const r of results) {
       if (!r.present || r.confidence < hitAt) continue;
       const rule = ruleById(r.id);
+      const range = visionBlurRange(r.frameIndices, prevCount, imageUrls.length - prevCount);
       flags.push({
-        startMs: 0,
-        endMs: CHUNK_MS,
+        startMs: range.startMs,
+        endMs: range.endMs,
         box: { x: 0, y: 0, w: 1, h: 1 },
         label: rule ? `${rule.title} (spark ${r.confidence.toFixed(2)})` : `${r.id} (spark)`,
         ruleId: r.id,
+        precise: true,
       });
     }
   }

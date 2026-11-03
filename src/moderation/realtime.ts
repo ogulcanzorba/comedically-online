@@ -389,9 +389,38 @@ function detail(e: unknown): string {
   return (e instanceof Error ? e.message : String(e)).slice(0, 200);
 }
 
-/** Realtime bleep window around a match at stream ms t: [t-1500, t+300]. */
-export const REALTIME_BLEEP_PRE_MS = 1500;
-export const REALTIME_BLEEP_POST_MS = 300;
+/**
+ * Emission lag: how far the ASR frontier (audioProcessedMs at the first
+ * matching partial) runs past the matched word's true end. Measured 232ms
+ * stable over 3 trials on a word at known position; the +250ms end guard
+ * absorbs framing/lookahead variance.
+ */
+export function realtimeLagMs(): number {
+  const raw = Number(process.env.REALTIME_LAG_MS ?? 250);
+  return Number.isFinite(raw) && raw >= 0 && raw <= 5000 ? raw : 250;
+}
+
+/** Guard around the estimated word edges (word start-250 .. word end+250). */
+export const WORD_GUARD_MS = 250;
+
+/** Rough spoken-word duration from token length, clamped to 300..1000ms. */
+export function estimateWordMs(tokenChars: number): number {
+  if (!Number.isFinite(tokenChars) || tokenChars <= 0) return 600;
+  return Math.max(300, Math.min(1000, Math.round(tokenChars * 90)));
+}
+
+/**
+ * Bleep window for a match at stream ms t: lag-corrected word end, minus
+ * the estimated word length, ±250ms guards. Sub-chunk, not whole chunks.
+ */
+export function realtimeBleepWindow(tMs: number, tokenChars: number): { startMs: number; endMs: number } {
+  const wordEnd = tMs - realtimeLagMs();
+  const wordStart = wordEnd - estimateWordMs(tokenChars);
+  return {
+    startMs: Math.max(0, Math.round(wordStart - WORD_GUARD_MS)),
+    endMs: Math.round(wordEnd + WORD_GUARD_MS),
+  };
+}
 
 export interface ChunkSlice {
   seq: number;

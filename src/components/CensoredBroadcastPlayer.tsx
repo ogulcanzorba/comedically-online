@@ -6,6 +6,8 @@ import { renderCensoredVideo } from '@/lib/censor-render';
 
 export interface BroadcastMarker {
   seq: number;
+  /** Scene seconds of the window start (sub-chunk precision). */
+  atS: number;
   action: 'bleep' | 'blur';
   label: string;
 }
@@ -35,8 +37,8 @@ export function CensoredBroadcastPlayer({
   }, [muted]);
   const blurs = activeBlursAt(plan, now);
   const sync = (el: HTMLVideoElement): void => setNow(el.currentTime);
-  const seek = (seq: number): void => {
-    if (videoRef.current) videoRef.current.currentTime = seq * 2;
+  const seek = (atS: number): void => {
+    if (videoRef.current) videoRef.current.currentTime = Math.max(0, atS - 1);
   };
   const download = async (): Promise<void> => {
     setRenderError('');
@@ -89,15 +91,15 @@ export function CensoredBroadcastPlayer({
         )}
       </div>
       <div className="relative mt-2 h-2 rounded bg-neutral-800" role="img" aria-label={`${markers.length} censored moments`}>
-        {markers.map((m) => (
+        {markers.map((m, i) => (
           <button
-            key={`${m.seq}-${m.action}`}
-            title={`@${m.seq * 2}s ${m.action}: ${m.label}`}
-            onClick={() => seek(m.seq)}
+            key={`${m.seq}-${m.action}-${i}`}
+            title={`@${m.atS.toFixed(1)}s ${m.action}: ${m.label}`}
+            onClick={() => seek(m.atS)}
             className={`absolute top-0 h-2 w-2 -translate-x-1/2 rounded-full ${
               m.action === 'bleep' ? 'bg-red-400' : 'bg-amber-300'
             }`}
-            style={{ left: `${Math.min(100, ((m.seq * 2) / span) * 100)}%` }}
+            style={{ left: `${Math.min(100, (m.atS / span) * 100)}%` }}
           />
         ))}
       </div>

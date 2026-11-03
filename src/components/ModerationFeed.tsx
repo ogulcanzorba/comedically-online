@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ChunkDebug, Decision } from '@/moderation/types';
 import rulebookData from '@/moderation/rulebook.json';
 import { localRecording, useLocalRecording } from '@/lib/local-recording';
-import { planForBroadcast } from '@/lib/censor-plan';
+import { formatSceneRange, planForBroadcast, sceneRangeS } from '@/lib/censor-plan';
 import { CensoredBroadcastPlayer, type BroadcastMarker } from './CensoredBroadcastPlayer';
 
 export interface FeedEvent {
@@ -245,6 +245,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
       .filter((d) => d.action === 'bleep' || d.action === 'blur')
       .map((d) => ({
         seq: e.seq,
+        atS: sceneRangeS(e.seq, d.startMs, d.endMs).startS,
         action: d.action as 'bleep' | 'blur',
         label: `${ruleLabel(d.ruleId)}: ${d.explanation ?? d.reason}`,
       })),
@@ -338,7 +339,9 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                   .filter((d) => d.action === 'bleep' || d.action === 'blur')
                   .map((d, i) => (
                     <p key={i}>
-                      <span className="font-mono text-xs text-neutral-500">@{sceneTime(e.seq)}</span>{' '}
+                      <span className="font-mono text-xs text-neutral-500">
+                        @{formatSceneRange(e.seq, d.startMs, d.endMs)}
+                      </span>{' '}
                       <span className="font-semibold text-amber-200">{d.action}</span>{' '}
                       <span className="text-neutral-400">
                         — {ruleLabel(d.ruleId)}: {d.explanation ?? d.reason}

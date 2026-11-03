@@ -72,6 +72,13 @@ export interface StudioWarningMessage {
   message: string;
 }
 
+/** Server -> viewer: the show just started; the stream follows this countdown. */
+export interface StartingMessage {
+  type: 'starting';
+  /** Ms until the waiting screen lifts (remaining time for late joiners). */
+  startsInMs: number;
+}
+
 /** Server -> viewer: the delayed stream has fully played out. */
 export interface EndOfStreamMessage {
   type: 'end';

@@ -47,6 +47,33 @@ export function isBleepedAt(plan: CensorPlan, tS: number): boolean {
   return plan.bleeps.some((b) => tS >= b.startS && tS < b.endS);
 }
 
+/** Scene seconds of a chunk-relative decision window (chunk N starts at N*2s). */
+export function sceneRangeS(
+  seq: number,
+  startMs: number | undefined,
+  endMs: number | undefined,
+): { startS: number; endS: number } {
+  const offsetS = seq * 2;
+  return {
+    startS: Math.max(0, offsetS + (startMs ?? 0) / 1000),
+    endS: offsetS + (endMs ?? 2000) / 1000,
+  };
+}
+
+/** "m:ss.s–m:ss.s" for a sub-chunk decision window (whole-chunk reads "m:ss–m:ss"). */
+export function formatSceneRange(seq: number, startMs: number | undefined, endMs: number | undefined): string {
+  const fmt = (tS: number): string => {
+    const m = Math.floor(tS / 60);
+    const s = Math.floor(tS % 60);
+    const tenths = Math.floor((tS % 1) * 10);
+    return tenths === 0
+      ? `${m}:${String(s).padStart(2, '0')}`
+      : `${m}:${String(s).padStart(2, '0')}.${tenths}`;
+  };
+  const { startS, endS } = sceneRangeS(seq, startMs, endMs);
+  return `${fmt(startS)}–${fmt(endS)}`;
+}
+
 export function activeBlursAt(plan: CensorPlan, tS: number): NormBox[] {
   return plan.blurs.filter((b) => tS >= b.startS && tS < b.endS).map((b) => b.box);
 }

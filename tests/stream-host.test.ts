@@ -12,8 +12,10 @@ import {
   StreamHost,
   blurPadChunks,
   captureDir,
+  failClosedDecisions,
   maxConcurrent,
   maxHoldMs,
+  startCountdownMs,
 } from '../src/server/stream-host';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -81,20 +83,20 @@ describe('maxConcurrent', () => {
 });
 
 describe('blurPadChunks', () => {
-  it('defaults to 1 and honors BLUR_PAD_CHUNKS', () => {
-    assert.equal(DEFAULT_BLUR_PAD_CHUNKS, 1);
+  it('defaults to 0 and honors BLUR_PAD_CHUNKS', () => {
+    assert.equal(DEFAULT_BLUR_PAD_CHUNKS, 0);
     const saved = process.env.BLUR_PAD_CHUNKS;
     delete process.env.BLUR_PAD_CHUNKS;
     try {
-      assert.equal(blurPadChunks(), 1);
-      process.env.BLUR_PAD_CHUNKS = '0';
       assert.equal(blurPadChunks(), 0);
+      process.env.BLUR_PAD_CHUNKS = '1';
+      assert.equal(blurPadChunks(), 1);
       process.env.BLUR_PAD_CHUNKS = '2';
       assert.equal(blurPadChunks(), 2);
       process.env.BLUR_PAD_CHUNKS = '-1';
-      assert.equal(blurPadChunks(), 1);
+      assert.equal(blurPadChunks(), 0);
       process.env.BLUR_PAD_CHUNKS = 'junk';
-      assert.equal(blurPadChunks(), 1);
+      assert.equal(blurPadChunks(), 0);
     } finally {
       if (saved === undefined) delete process.env.BLUR_PAD_CHUNKS;
       else process.env.BLUR_PAD_CHUNKS = saved;
@@ -118,7 +120,7 @@ describe('safety-margin blur padding', () => {
 
   it('pads the chunks around a flagged chunk with whole-frame blurs', async () => {
     const saved = process.env.BLUR_PAD_CHUNKS;
-    delete process.env.BLUR_PAD_CHUNKS;
+    process.env.BLUR_PAD_CHUNKS = '1';
     const viewerSent: unknown[] = [];
     const pubSent: unknown[] = [];
     try {
@@ -513,5 +515,170 @@ describe('per-chunk lifecycle log', () => {
       released?.decisions?.map((d) => d.action).sort(),
       ['bleep', 'blur'],
     );
+  });
+});
+
+describe('pre-show countdown', () => {
+  function strings(sent: unknown[]): Array<Record<string, unknown>> {
+    return sent
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+  }
+
+  it('defaults to 10s and honors START_COUNTDOWN_MS', () => {
+    const saved = process.env.START_COUNTDOWN_MS;
+    delete process.env.START_COUNTDOWN_MS;
+    try {
+      assert.equal(startCountdownMs(), 10_000);
+      process.env.START_COUNTDOWN_MS = '5000';
+      assert.equal(startCountdownMs(), 5000);
+      process.env.START_COUNTDOWN_MS = 'junk';
+      assert.equal(startCountdownMs(), 10_000);
+    } finally {
+      if (saved === undefined) delete process.env.START_COUNTDOWN_MS;
+      else process.env.START_COUNTDOWN_MS = saved;
+    }
+  });
+
+  it('announces go-live to waiting viewers; late joiners get the remainder', async () => {
+    const saved = process.env.START_COUNTDOWN_MS;
+    process.env.START_COUNTDOWN_MS = '10000';
+    const early: unknown[] = [];
+    const late: unknown[] = [];
+    try {
+      await capture(async () => {
+        const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+        try {
+          host.handleConnection(fakeSocket(early), 'viewer');
+          host.handleConnection(fakeSocket([]), 'publisher');
+          await sleep(120);
+          host.handleConnection(fakeSocket(late), 'viewer');
+          await sleep(50);
+        } finally {
+          host.close();
+        }
+      });
+    } finally {
+      if (saved === undefined) delete process.env.START_COUNTDOWN_MS;
+      else process.env.START_COUNTDOWN_MS = saved;
+    }
+    const first = strings(early).filter((m) => m.type === 'starting');
+    const second = strings(late).filter((m) => m.type === 'starting');
+    assert.equal(first.length, 1);
+    assert.equal(second.length, 1);
+    const full = first[0].startsInMs as number;
+    const rest = second[0].startsInMs as number;
+    assert.ok(full <= 10_000 && full > 9_800, `full countdown ${full}`);
+    assert.ok(rest < full, `remainder ${rest} < ${full}`);
+  });
+});
+
+describe('init carries chunk-0 decisions', () => {
+  function strings(sent: unknown[]): Array<Record<string, unknown>> {
+    return sent
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+  }
+
+  function emit(pub: { emit: (e: string, ...a: unknown[]) => void }, seq: number, kinds: Array<'webm' | 'wav'>): void {
+    for (const kind of kinds) {
+      pub.emit('message', JSON.stringify({ type: 'media', kind, seq }), false);
+      pub.emit('message', Buffer.from(`${kind}-${seq}`), true);
+    }
+  }
+
+  it('pairs late-joiner init bytes with the stored chunk-0 decisions', async () => {
+    const first: unknown[] = [];
+    const late: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        host.handleConnection(fakeSocket(first), 'viewer');
+        emit(pub as unknown as { emit: (e: string, ...a: unknown[]) => void }, 0, ['webm', 'wav']);
+        emit(pub as unknown as { emit: (e: string, ...a: unknown[]) => void }, 1, ['webm', 'wav']);
+        await sleep(250);
+        host.handleConnection(fakeSocket(late), 'viewer');
+        await sleep(50);
+      } finally {
+        host.close();
+      }
+    });
+    const released = strings(first).filter((m) => m.type === 'chunk' && m.seq === 0);
+    const inits = strings(late).filter((m) => m.type === 'chunk' && m.init === true);
+    assert.equal(released.length, 1);
+    assert.equal(inits.length, 1);
+    assert.deepEqual(inits[0].decisions, released[0].decisions);
+  });
+
+  it('holds init bytes until chunk 0 is moderated', async () => {
+    const late: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 60, tickMs: 5, audioWaitMs: 150 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        const emitter = pub as unknown as { emit: (e: string, ...a: unknown[]) => void };
+        emit(emitter, 0, ['webm']); // wav still missing: moderation waits
+        await sleep(30);
+        host.handleConnection(fakeSocket(late), 'viewer');
+        await sleep(30);
+        assert.deepEqual(
+          strings(late).filter((m) => m.type === 'chunk'),
+          [],
+          'no init bytes while chunk 0 is unmoderated',
+        );
+        emit(emitter, 0, ['wav']);
+        await sleep(250);
+      } finally {
+        host.close();
+      }
+    });
+    const inits = strings(late).filter((m) => m.type === 'chunk' && m.init === true);
+    assert.equal(inits.length, 1, 'init arrives once chunk 0 is moderated');
+  });
+});
+
+describe('failClosedDecisions', () => {
+  it('censors the whole chunk (bleep + full-frame blur)', () => {
+    const out = failClosedDecisions('boom');
+    assert.equal(out.length, 2);
+    assert.deepEqual(
+      out.map((d) => [d.action, d.startMs, d.endMs, d.reason]),
+      [
+        ['bleep', 0, 2000, 'boom'],
+        ['blur', 0, 2000, 'boom'],
+      ],
+    );
+    assert.deepEqual(out[1].box, { x: 0, y: 0, w: 1, h: 1 });
+  });
+});
+
+describe('post-end join', () => {
+  it('serves exactly one end message and no chunks', async () => {
+    const late: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        const emitter = pub as unknown as { emit: (e: string, ...a: unknown[]) => void };
+        emitter.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
+        emitter.emit('message', Buffer.from('webm-0'), true);
+        emitter.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq: 0 }), false);
+        emitter.emit('message', Buffer.from('wav-0'), true);
+        emitter.emit('message', JSON.stringify({ type: 'end-broadcast' }), false);
+        await sleep(400);
+        host.handleConnection(fakeSocket(late), 'viewer');
+        await sleep(50);
+      } finally {
+        host.close();
+      }
+    });
+    const msgs = late
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+    assert.deepEqual(msgs.map((m) => m.type), ['end']);
   });
 });

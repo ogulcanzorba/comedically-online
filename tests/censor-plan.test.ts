@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Decision } from '../src/moderation/types';
-import { activeBlursAt, isBleepedAt, planForBroadcast } from '../src/lib/censor-plan';
+import { activeBlursAt, formatSceneRange, isBleepedAt, planForBroadcast, sceneRangeS } from '../src/lib/censor-plan';
 
 const BLEEP: Decision = { action: 'bleep', reason: 'r', startMs: 500, endMs: 900 };
 const BLUR: Decision = {
@@ -58,5 +58,18 @@ describe('censor windows', () => {
     assert.deepEqual(activeBlursAt(plan, 9.99), []);
     assert.deepEqual(activeBlursAt(plan, 11), [BLUR.box]);
     assert.deepEqual(activeBlursAt(plan, 12), []);
+  });
+});
+
+describe('scene ranges', () => {
+  it('maps chunk-relative windows onto scene seconds', () => {
+    assert.deepEqual(sceneRangeS(12, 960, 2000), { startS: 24.96, endS: 26 });
+    assert.deepEqual(sceneRangeS(0, undefined, undefined), { startS: 0, endS: 2 });
+  });
+
+  it('formats sub-chunk ranges with tenths, whole chunks plain', () => {
+    assert.equal(formatSceneRange(12, 960, 2000), '0:24.9\u20130:26');
+    assert.equal(formatSceneRange(0, 0, 2000), '0:00\u20130:02');
+    assert.equal(formatSceneRange(31, 500, 1500), '1:02.5\u20131:03.5');
   });
 });

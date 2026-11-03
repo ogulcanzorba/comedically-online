@@ -43,6 +43,12 @@ export interface VisualFlag {
   box: NormBox;
   label: string;
   ruleId?: string;
+  /**
+   * Frame-localized range (Spark frame indices): the pipeline blurs exactly
+   * this window instead of the whole chunk. Absent for SAM/gate whole-chunk
+   * flags.
+   */
+  precise?: boolean;
 }
 
 export interface ModerationLogEntry {
@@ -76,7 +82,7 @@ export interface ChunkDebug {
   judgeSkipped: boolean;
   timingsMs: ChunkTimings;
   /** Raw stage errors (sanitized, truncated, never secrets). Omitted when empty. */
-  errors: { voice?: string; sam?: string; judge?: string };
+  errors: { voice?: string; vision?: string; judge?: string };
   /** Per-concept SAM breakdown (live visual checks only). */
   samBreakdown?: SamBreakdown;
   /** VLM gate breakdown (live visual checks via the gate strategy only). */

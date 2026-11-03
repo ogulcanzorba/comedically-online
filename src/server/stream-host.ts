@@ -5,18 +5,17 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { Semaphore } from '../lib/semaphore';
-import { FALLBACK_LABEL, moderateChunk, moderationMode } from '../moderation/index';
+import { FALLBACK_LABEL, mergeBleepWindow, moderateChunk, moderationMode } from '../moderation/index';
 import { audioBleepRules, ruleById } from '../moderation/rulebook';
 import { hysteresisNext, initialHysteresis } from '../moderation/spark-vision';
 import type { HysteresisState } from '../moderation/spark-vision';
 import { judgeContext } from '../moderation/judge';
-import { matchBanned, OccurrenceTracker, tokenizeTr } from '../moderation/fuzzy';
+import { isNearExact, matchBanned, OccurrenceTracker, tokenizeTr } from '../moderation/fuzzy';
 import type { BannedSpelling, FuzzyHit } from '../moderation/fuzzy';
 import {
   mapRangeToChunks,
   PCM16_BYTES_PER_MS,
-  REALTIME_BLEEP_POST_MS,
-  REALTIME_BLEEP_PRE_MS,
+  realtimeBleepWindow,
   RealtimeSession,
 } from '../moderation/realtime';
 import { concatWavs, extractWavPcm, wavPcmMs } from '../moderation/transcribe';
@@ -32,6 +31,7 @@ import type {
   LogBroadcast,
   MediaMetaMessage,
   RulesMessage,
+  StartingMessage,
   StreamEndedMessage,
   StudioWarningMessage,
 } from '../lib/ws-protocol';
@@ -65,8 +65,12 @@ export function maxConcurrent(): number {
   return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_CONCURRENT;
 }
 
-/** Default safety-margin blur span around a flagged chunk (±chunks). */
-export const DEFAULT_BLUR_PAD_CHUNKS = 1;
+/**
+ * Default safety-margin blur span around a flagged chunk (±chunks).
+ * Frame-localized ranges made the backward margin redundant (it blurred
+ * whole chunks before the gesture); raise via BLUR_PAD_CHUNKS for SAM.
+ */
+export const DEFAULT_BLUR_PAD_CHUNKS = 0;
 
 /** Overridable via BLUR_PAD_CHUNKS (0 disables the safety margin). */
 export function blurPadChunks(): number {
@@ -89,6 +93,44 @@ const REALTIME_DOWN_CODE = 'realtime-down';
 
 /** PCM bytes per 2s chunk at 16kHz 16-bit mono (alignment unit). */
 const CHUNK_PCM_BYTES = 2000 * PCM16_BYTES_PER_MS;
+
+/** Pre-show viewer countdown once the comedian starts (default 10s). */
+export function startCountdownMs(): number {
+  const raw = Number(process.env.START_COUNTDOWN_MS ?? 10_000);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 10_000;
+}
+
+/**
+ * Full-chunk fail-closed decisions: a moderation error censors instead of
+ * releasing raw unmoderated media to viewers.
+ */
+export function failClosedDecisions(reason: string): Decision[] {
+  return [
+    { action: 'bleep', reason, startMs: 0, endMs: 2000 },
+    {
+      action: 'blur',
+      reason,
+      startMs: 0,
+      endMs: 2000,
+      box: { ...FULL_FRAME },
+      label: 'full frame (moderation error)',
+    },
+  ];
+}
+
+/**
+ * Minimum float (ms) between a fuzzy hit and the audio leaving the delay
+ * buffer for the judge to be worth consulting. Below this the bleep applies
+ * at once (fail-closed): a verdict that cannot arrive in time helps nobody.
+ */
+const FUZZY_JUDGE_BUDGET_MS = 6000;
+
+/**
+ * Same-rule realtime hits within this stream-ms distance are one occurrence
+ * (exact + fuzzy + judge must not triple-bleep a word). Tokens differ across
+ * normalizations, so the identity is rule + time, not the token text.
+ */
+const RT_OCCURRENCE_MS = 1000;
 
 const FULL_FRAME = { x: 0, y: 0, w: 1, h: 1 } as const;
 
@@ -229,6 +271,8 @@ export class StreamHost {
   private realtimeUp = false;
   private realtimeWarned = false;
   private rtTracker = new OccurrenceTracker();
+  /** Scheduled realtime bleeps (rule + stream ms) for occurrence dedupe. */
+  private rtScheduled: Array<{ ruleId: string; tMs: number }> = [];
   /** Seqs carrying a realtime bleep (fallback skips covered chunks). */
   private readonly realtimeBleepedSeqs = new Set<number>();
   /** Realtime bleeps owed to chunks not yet stored (seq -> bleeps). */
@@ -238,6 +282,10 @@ export class StreamHost {
   private readonly tracker = new SpendTracker();
   private readonly streamStartMs = Date.now();
   private initSegment: Buffer | null = null;
+  /** Publisher attach time (Date.now(), 0 before the first broadcast). */
+  private broadcastStartedAtMs = 0;
+  /** Viewers waiting for chunk-0 decisions before their init bytes. */
+  private readonly pendingInit = new Set<WebSocket>();
   private nextSeq = 0;
   private pendingMeta: MediaMetaMessage | null = null;
   private readonly pendingMedia = new Map<number, PendingMedia>();
@@ -287,15 +335,53 @@ export class StreamHost {
       return;
     }
     this.viewers.add(ws);
+    const countdown = startCountdownMs();
+    const elapsed = Date.now() - this.broadcastStartedAtMs;
+    if (this.broadcastStartedAtMs > 0 && elapsed < countdown) {
+      this.sendJson(ws, {
+        type: 'starting',
+        startsInMs: Math.max(0, countdown - elapsed),
+      } satisfies StartingMessage);
+    }
     if (this.initSegment) {
-      // Late joiner: headers now (stale media), live-delayed chunks after.
-      this.sendChunk(ws, { seq: 0, data: this.initSegment, init: true, decisions: [] });
+      if (this.decisions.has(0)) {
+        this.sendInit(ws);
+      } else {
+        // Chunk 0 still moderating: hold init bytes until its decisions
+        // exist, so joiners never play unmoderated media.
+        this.pendingInit.add(ws);
+      }
       this.startedViewers.add(ws);
     }
     ws.on('close', () => {
       this.viewers.delete(ws);
       this.startedViewers.delete(ws);
+      this.pendingInit.delete(ws);
     });
+  }
+
+  /** Init bytes for a late joiner, always paired with chunk-0 decisions. */
+  private sendInit(ws: WebSocket): void {
+    if (!this.initSegment) return;
+    this.pendingInit.delete(ws);
+    this.sendChunk(ws, {
+      seq: 0,
+      data: this.initSegment,
+      init: true,
+      decisions: this.decisions.get(0) ?? [],
+    });
+  }
+
+  /** Release held init bytes once chunk 0 is moderated (or force-released). */
+  private flushPendingInit(seq: number): void {
+    if (seq !== 0 || this.pendingInit.size === 0) return;
+    for (const ws of [...this.pendingInit]) {
+      if (ws.readyState !== 1) {
+        this.pendingInit.delete(ws);
+        continue;
+      }
+      this.sendInit(ws);
+    }
   }
 
   close(): void {
@@ -323,6 +409,13 @@ export class StreamHost {
     this.publisher = ws;
     this.resetStream();
     this.startRealtime();
+    this.broadcastStartedAtMs = Date.now();
+    for (const viewer of [...this.viewers]) {
+      this.sendJson(viewer, {
+        type: 'starting',
+        startsInMs: startCountdownMs(),
+      } satisfies StartingMessage);
+    }
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
         this.onBinary(Buffer.from(data as Buffer));
@@ -369,6 +462,8 @@ export class StreamHost {
     this.pendingMedia.clear();
     this.pendingMeta = null;
     this.initSegment = null;
+    this.broadcastStartedAtMs = 0;
+    this.pendingInit.clear();
     this.nextSeq = 0;
     this.lastJpgs = [];
     this.hysteresis = initialHysteresis();
@@ -376,6 +471,7 @@ export class StreamHost {
     this.lastWav = null;
     this.lastWavStudioSeq = -1;
     this.rtTracker = new OccurrenceTracker();
+    this.rtScheduled = [];
     this.realtimeBleepedSeqs.clear();
     this.bleepOwed.clear();
     for (const t of this.fuzzyTimers) clearTimeout(t);
@@ -691,6 +787,7 @@ export class StreamHost {
             res.entry.reason += ` (whole-frame blur, safety margin ±${pad} chunk${pad === 1 ? '' : 's'})`;
           }
           this.decisions.set(seq, stored);
+          this.flushPendingInit(seq);
           this.chunkDebug.set(seq, res.debug);
           if (res.transcriptText.trim().length > 0) {
             this.transcriptWindow.push({ atMs: Date.now(), text: res.transcriptText });
@@ -718,13 +815,19 @@ export class StreamHost {
             this.forceReleased.delete(seq);
             return;
           }
-          this.decisions.set(seq, []);
-          this.pushLog({
-            seq,
-            at: new Date().toISOString(),
-            action: 'warn',
-            reason: 'moderation error; released unmodified after delay',
+          // Fail closed: viewers must never receive raw unmoderated media.
+          const reason = 'moderation error; released fully censored (fail-closed)';
+          this.decisions.set(seq, failClosedDecisions(reason));
+          this.flushPendingInit(seq);
+          this.chunkDebug.set(seq, {
+            transcript: '',
+            language: 'unknown',
+            matchedRule: null,
+            timingsMs: { queueMs: 0, voiceMs: 0, samMs: 0, judgeMs: 0 },
+            judgeSkipped: true,
+            errors: { vision: 'moderation pipeline error' },
           });
+          this.pushLog({ seq, at: new Date().toISOString(), action: 'bleep', reason });
         })
         .finally(() => {
           this.pendingModeration.delete(seq);
@@ -764,6 +867,16 @@ export class StreamHost {
     for (const hit of hits) {
       if (this.rtTracker.isClaimed(hit.ruleId, hit.token, hit.ordinal)) continue;
       this.rtTracker.claim(hit.ruleId, hit.token, hit.ordinal);
+      // Cross-source occurrence dedupe: an exact hit and a fuzzy variant of
+      // the same spoken word share (rule, time) but not the token text.
+      this.rtScheduled = this.rtScheduled.filter((s) => tMs - s.tMs < 30_000);
+      if (this.rtScheduled.some((s) => s.ruleId === hit.ruleId && Math.abs(tMs - s.tMs) < RT_OCCURRENCE_MS)) {
+        console.log(
+          `[rt-bleep] t=${Math.round(tMs)}ms rule=${hit.ruleId} token="${hit.token}" deduped (same occurrence)`,
+        );
+        continue;
+      }
+      this.rtScheduled.push({ ruleId: hit.ruleId, tMs });
       if (hit.exact) {
         this.applyRealtimeWindow(tMs, hit, false);
       } else {
@@ -772,9 +885,10 @@ export class StreamHost {
     }
   }
 
-  /** Exact match: bleep [t-1500, t+300] across the overlapped chunks at once. */
+  /** Exact match: bleep the lag-corrected word window across overlapped chunks. */
   private applyRealtimeWindow(tMs: number, hit: FuzzyHit, fuzzy: boolean): void {
-    const slices = mapRangeToChunks(tMs - REALTIME_BLEEP_PRE_MS, tMs + REALTIME_BLEEP_POST_MS);
+    const w = realtimeBleepWindow(tMs, hit.token.length);
+    const slices = mapRangeToChunks(w.startMs, w.endMs);
     for (const s of slices) {
       this.applyBleep(s.seq, realtimeBleepDecision(hit.ruleId, hit.token, s.startMs, s.endMs, fuzzy));
     }
@@ -787,11 +901,13 @@ export class StreamHost {
   }
 
   /**
-   * Fuzzy-only match: ask the judge, but bleep anyway when the audio leaves
-   * the buffer first (fail-closed). A judge allow cancels the bleep.
+   * Fuzzy-only match: near-exact variants bleep at once; the rest ask the
+   * judge when the delay budget allows, else bleep at once (fail-closed). A
+   * judge allow cancels the pending bleep.
    */
   private applyFuzzyWindow(tMs: number, hit: FuzzyHit, context: string): void {
-    const slices = mapRangeToChunks(tMs - REALTIME_BLEEP_PRE_MS, tMs + REALTIME_BLEEP_POST_MS);
+    const w = realtimeBleepWindow(tMs, hit.token.length);
+    const slices = mapRangeToChunks(w.startMs, w.endMs);
     if (slices.length === 0) return;
     const receiptBySeq = new Map(this.buffer.snapshot().map((c) => [c.seq, c.receiptTimeMs]));
     const allReleased = slices.every(
@@ -801,9 +917,26 @@ export class StreamHost {
       console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms already aired; dropping`);
       return;
     }
+    if (isNearExact(hit.distance)) {
+      this.applyRealtimeWindow(tMs, hit, false);
+      console.log(
+        `[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} token="${hit.token}" ` +
+          `near-exact (d=${hit.distance}); judge skipped`,
+      );
+      return;
+    }
     const deadlineMs = Math.max(
       ...slices.map((s) => (receiptBySeq.get(s.seq) ?? Date.now()) + this.buffer.delay),
     );
+    const floatMs = deadlineMs - Date.now();
+    if (floatMs < FUZZY_JUDGE_BUDGET_MS) {
+      this.applyRealtimeWindow(tMs, hit, true);
+      console.log(
+        `[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} float=${Math.round(floatMs)}ms ` +
+          `< ${FUZZY_JUDGE_BUDGET_MS}ms budget; judge skipped, bleeping at once`,
+      );
+      return;
+    }
     let resolved = false;
     const fire = (): void => {
       if (resolved) return;
@@ -811,28 +944,38 @@ export class StreamHost {
       for (const s of slices) {
         this.applyBleep(s.seq, realtimeBleepDecision(hit.ruleId, hit.token, s.startMs, s.endMs, true));
       }
-      console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} fail-closed (no judge verdict in time)`);
+      console.log(
+        `[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} fail-closed ` +
+          `(float was ${Math.round(floatMs)}ms, no judge verdict in time)`,
+      );
     };
     const timer = setTimeout(() => {
       this.fuzzyTimers.delete(timer);
       fire();
-    }, Math.max(0, deadlineMs - Date.now()));
+    }, Math.max(0, floatMs));
     if (typeof timer.unref === 'function') timer.unref();
     this.fuzzyTimers.add(timer);
+    const judgeStart = Date.now();
     judgeContext(
       { recentTranscript: this.recentTranscript(), chunkTranscript: context },
-      'live',
+      this.tracker.capped ? 'mock' : 'live',
     )
       .then((j) => {
         this.tracker.add(j.costUsd);
         if (resolved) return;
+        const judgeMs = Date.now() - judgeStart;
         if (j.verdict.action === 'bleep' || j.verdict.action === 'warn') {
+          console.log(
+            `[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} judge=${j.verdict.action} in ${judgeMs}ms`,
+          );
           fire();
         } else {
           resolved = true;
           clearTimeout(timer);
           this.fuzzyTimers.delete(timer);
-          console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} allowed by judge`);
+          console.log(
+            `[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} allowed by judge in ${judgeMs}ms`,
+          );
         }
       })
       .catch(() => {
@@ -847,16 +990,13 @@ export class StreamHost {
    */
   private applyBleep(victimSeq: number, decision: Decision): void {
     if (victimSeq < 0 || this.forceReleased.has(victimSeq)) return;
-    const same = (d: Decision): boolean =>
-      d.action === 'bleep' &&
-      d.ruleId === decision.ruleId &&
-      d.label === decision.label &&
-      d.startMs === decision.startMs &&
-      d.endMs === decision.endMs;
     const stored = this.decisions.get(victimSeq);
     if (stored) {
       if (!this.bufferedSeqs().has(victimSeq)) return;
-      if (!stored.some(same)) stored.push(decision);
+      // Merge in place: same-rule overlaps become one union window.
+      const merged = mergeBleepWindow(stored, decision);
+      stored.length = 0;
+      stored.push(...merged);
       this.realtimeBleepedSeqs.add(victimSeq);
       return;
     }
@@ -866,8 +1006,7 @@ export class StreamHost {
       this.pendingModeration.has(victimSeq)
     ) {
       const owed = this.bleepOwed.get(victimSeq) ?? [];
-      if (!owed.some(same)) owed.push(decision);
-      this.bleepOwed.set(victimSeq, owed);
+      this.bleepOwed.set(victimSeq, mergeBleepWindow(owed, decision));
       this.realtimeBleepedSeqs.add(victimSeq);
     }
   }
@@ -993,13 +1132,14 @@ export class StreamHost {
           label: 'full frame (max hold exceeded)',
         },
       ]);
+      this.flushPendingInit(chunk.seq);
       this.chunkDebug.set(chunk.seq, {
         transcript: '',
         language: 'unknown',
         matchedRule: null,
         timingsMs: { queueMs: nowMs - chunk.receiptTimeMs, voiceMs: 0, samMs: 0, judgeMs: 0 },
         judgeSkipped: false,
-        errors: { sam: `max hold exceeded (${this.maxOverdueMs}ms past the delay)` },
+        errors: { vision: `max hold exceeded (${this.maxOverdueMs}ms past the delay)` },
       });
       this.pushLog({ seq: chunk.seq, at: new Date().toISOString(), action: 'bleep', reason });
       console.log(
@@ -1023,6 +1163,9 @@ export class StreamHost {
             this.startedViewers.delete(ws);
             continue;
           }
+          // Held for init: chunk 0's decisions gate their first bytes.
+          // Nothing is missed — nothing releases before chunk 0 moderates.
+          if (this.pendingInit.has(ws)) continue;
           const init = !this.startedViewers.has(ws);
           this.sendChunk(ws, { seq: chunk.seq, data: chunk.data, init, decisions, debug });
           this.startedViewers.add(ws);
@@ -1061,6 +1204,7 @@ export class StreamHost {
     for (const ws of [...this.viewers]) {
       if (this.endedViewers.has(ws)) continue;
       this.endedViewers.add(ws);
+      this.pendingInit.delete(ws);
       this.sendJson(ws, { type: 'end' } satisfies EndOfStreamMessage);
     }
     console.log('[end] delayed stream fully played out; ended notifications sent.');

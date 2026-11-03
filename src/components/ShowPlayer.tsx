@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Decision } from '@/moderation/types';
 import { activeAt, pruneWindows, type DecisionWindow } from '@/lib/overlay-timing';
+import { teardownPlayback } from '@/lib/playback';
 
 interface ChunkMeta {
   seq: number;
@@ -22,9 +23,16 @@ interface QueuedChunk {
 export function ShowPlayer() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const windowsRef = useRef<DecisionWindow[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+  const msRef = useRef<MediaSource | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const tornDownRef = useRef(false);
   const [status, setStatus] = useState('Connecting… (stream runs ~12s behind live)');
   const [active, setActive] = useState<Decision[]>([]);
   const [sceneAt, setSceneAt] = useState(0);
+  const [startingMs, setStartingMs] = useState<number | null>(null);
+  const [hasEnded, setHasEnded] = useState(false);
+  const [showEnded, setShowEnded] = useState(false);
 
   function formatScene(sec: number): string {
     const m = Math.floor(sec / 60);
@@ -57,7 +65,8 @@ export function ShowPlayer() {
       } catch {
         // already ended or closing; status update below still applies
       }
-      setStatus('Stream ended — thanks for watching.');
+      setStatus('The show has ended.');
+      setHasEnded(true);
     }
 
     function pump(): void {
@@ -102,7 +111,9 @@ export function ShowPlayer() {
     }
 
     mediaSource = new MediaSource();
-    video.src = URL.createObjectURL(mediaSource);
+    msRef.current = mediaSource;
+    urlRef.current = URL.createObjectURL(mediaSource);
+    video.src = urlRef.current;
     mediaSource.addEventListener('sourceopen', () => {
       if (cancelled || !mediaSource) return;
       try {
@@ -117,14 +128,20 @@ export function ShowPlayer() {
     });
 
     ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?role=viewer`);
+    wsRef.current = ws;
     ws.binaryType = 'arraybuffer';
     ws.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data === 'string') {
         try {
-          const msg = JSON.parse(ev.data) as ChunkMeta & { type?: string };
+          const msg = JSON.parse(ev.data) as ChunkMeta & { type?: string; startsInMs?: number };
           if (msg.type === 'end') {
             streamEnded = true;
             pump();
+            return;
+          }
+          if (msg.type === 'starting') {
+            setStartingMs(typeof msg.startsInMs === 'number' ? Math.max(0, msg.startsInMs) : 0);
+            setStatus('The comedian has started the show.');
             return;
           }
           pendingMeta = msg.type === 'chunk' ? msg : null;
@@ -150,6 +167,43 @@ export function ShowPlayer() {
     };
   }, []);
 
+  // Pre-show countdown ticker; lifts the waiting screen at zero.
+  useEffect(() => {
+    if (startingMs === null || startingMs <= 0) return;
+    const timer = window.setInterval(() => {
+      setStartingMs((prev) => (prev === null || prev <= 250 ? 0 : prev - 250));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [startingMs !== null && startingMs > 0]);
+
+  // Post-show teardown: once playback finishes, drop every handle on the
+  // media (no replay, no seek-back into buffers) and close the socket.
+  useEffect(() => {
+    if (!hasEnded) return;
+    const video = videoRef.current;
+    if (!video) return;
+    const teardown = (): void => {
+      if (tornDownRef.current) return;
+      tornDownRef.current = true;
+      windowsRef.current = [];
+      setActive([]);
+      teardownPlayback({
+        video,
+        mediaSource: msRef.current,
+        objectUrl: urlRef.current,
+        revokeObjectUrl: (url) => URL.revokeObjectURL(url),
+        sockets: wsRef.current ? [wsRef.current] : [],
+      });
+      setShowEnded(true);
+    };
+    if (video.ended) {
+      teardown();
+      return;
+    }
+    video.addEventListener('ended', teardown, { once: true });
+    return () => video.removeEventListener('ended', teardown);
+  }, [hasEnded]);
+
   const blurs = active.filter((d) => d.action === 'blur' && d.box);
   const bleeping = active.some((d) => d.action === 'bleep');
   const whys = [...new Set(active.map((d) => d.explanation ?? d.reason))].slice(0, 2);
@@ -166,7 +220,22 @@ export function ShowPlayer() {
       </div>
       <p className="mt-2 text-sm text-neutral-400">{status}</p>
       <div className="relative mt-4">
-        <video ref={videoRef} controls playsInline className="aspect-video w-full rounded-md bg-black" />
+        <video ref={videoRef} playsInline disablePictureInPicture className="aspect-video w-full rounded-md bg-black" />
+        {startingMs !== null && startingMs > 0 && !hasEnded && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center rounded-md bg-black/85">
+            <p className="text-lg font-semibold text-neutral-100">The comedian has started the show.</p>
+            <p className="mt-2 text-5xl font-bold tabular-nums text-amber-300" aria-live="polite">
+              {Math.ceil(startingMs / 1000)}
+            </p>
+            <p className="mt-2 text-sm text-neutral-400">The stream begins in a moment.</p>
+          </div>
+        )}
+        {showEnded && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center rounded-md bg-black/85">
+            <p className="text-lg font-semibold text-neutral-100">The show has ended.</p>
+            <p className="mt-2 text-sm text-neutral-400">Thanks for watching — this performance is no longer available.</p>
+          </div>
+        )}
         {blurs.map((d, i) => (
           <div
             key={i}

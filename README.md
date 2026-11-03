@@ -35,14 +35,18 @@ npm run dev            # http://localhost:3000
 | `SAM_IMAGE_TIMEOUT_MS` | `6000` | SAM image calls: no retries, fail closed fast. |
 | `VISION_BACKEND` | `spark` | Live visual path: `spark` (one multi-frame call) / `sam` / `gate`. Legacy `VISUAL_STRATEGY` alias honored when unset. |
 | `SPARK_VISION_MODEL` / `SPARK_VISION_EFFORT` | `muse-spark-1.3` / `minimal` | Classifier model + effort (unsure band retries at `low`). |
-| `VISION_HIT` / `VISION_UNSURE` | `0.5` / `0.3` | Blur at ≥HIT; [UNSURE, HIT) gets a 2nd opinion call. Hysteresis blurs 2 chunks past each hit. |
+| `VISION_HIT` / `VISION_UNSURE` | `0.5` / `0.3` | Blur at ≥HIT; [UNSURE, HIT) gets a 2nd opinion call. Blur covers first→last positive frame ±250ms. |
+| `VISION_TIMEOUT_MS` | `8000` | Per-call vision budget inside the 12s delay (calls take ~2.2–3.8s). |
+| `HYSTERESIS_CHUNKS` | `1` | Clean chunks blurred past each vision hit. |
 | `SPARK_PRICING_MODE` | `standard` | `contributor` bills Spark at $0.10/$0.20 per 1M tokens. |
 | `GATE_FRAMES` / `GATE_TIMEOUT_MS` | `2` / `8000` | VLM calls per chunk over middle frames; per-call timeout. |
 | `MOD_POOL` | `8` | Chunks moderating at once. |
 | `VISUAL_FAIL_MODE` | `closed` | `open` releases failed visuals unblurred with a warning (demo testing). |
 | `FRAMES_PER_CHUNK` / `NEXT_PUBLIC_FRAMES_PER_CHUNK` | `4` / `4` | Frames sampled per chunk (must match); linear image cost, flat wall time. |
 | `FRAME_WIDTH` / `NEXT_PUBLIC_FRAME_WIDTH` | `640` / `640` | Sampled-frame width in px (must match; restart dev to apply). |
-| `BLUR_PAD_CHUNKS` | `1` | Neighbor chunks blurred around a flagged chunk (`0` disables). |
+| `BLUR_PAD_CHUNKS` | `0` | Neighbor chunks blurred around a flagged chunk (raise for SAM). |
+| `REALTIME_LAG_MS` | `250` | ASR emission lag: frontier past the true word end (measured 232ms). |
+| `START_COUNTDOWN_MS` | `10000` | Pre-show viewer countdown once the comedian starts. |
 | `DEBUG_FRAMES` | off | `1` saves sampled JPEGs to `debug-frames/` (gitignored) with per-concept `[sam]` logs. |
 | `DEBUG_CAPTURE` / `CHUNKS_DIR` | off / `/tmp/chunks` | `1` saves moderation inputs for `npm run soak:live` replay. |
 
@@ -94,13 +98,19 @@ drains the buffer to viewers before end-of-stream, with drain progress to the
 studio. Mock mode scripts bleeps/blurs; live mode behind the spend cap:
 - **Video**: one Spark Responses call per chunk over the previous chunk's last
   2 frames + this chunk's 4 (rulebook-generated prompt, JSON verdicts with
-  per-rule confidence; unsure band gets a `low` 2nd opinion; hysteresis blurs
-  2 chunks past each hit). `sam`/`gate` backends stay via `VISION_BACKEND`.
+  per-rule confidence; unsure band gets a `low` 2nd opinion; blur spans the
+  positive frames ±250ms; hysteresis holds 1 chunk past each hit).
+  `sam`/`gate` backends stay via `VISION_BACKEND`.
 - **Audio**: realtime ASR over WebSocket (Turkish-aware fuzzy match on every
-  partial/final, `[t-1500ms, t+300ms]` bleeps; fuzzy-only goes to the judge
-  with fail-closed timing) plus 4s overlapping file-transcription fallback
-  (whole-chunk bleeps, skipped where realtime covers). Studio shows a banner
-  while realtime is down.
+  partial/final; lag-corrected sub-chunk bleeps ≈ word start−250ms to word
+  end+250ms; one occurrence = one window across exact/fuzzy/judge/fallback;
+  near-exact skips the judge, the rest consult it within a 6s float budget)
+  plus 4s overlapping file-transcription fallback (whole-chunk bleeps,
+  skipped where realtime covers). Studio shows a banner while realtime is down.
+- **Viewers**: 10s "comedian has started" countdown, then the delayed stream;
+  after the end, "The show has ended" with player teardown (no replay/seek).
+  Late joiners get init bytes only paired with chunk-0 decisions; moderation
+  errors fail closed — viewers never receive raw unmoderated media.
 Measured (eval script, synthetic clean clips): spark-minimal-640 ~2.4s wall at
 ~$5/stream-hour; spark-minimal-320 ~$2.8/h; sam ~$36/h.
 
@@ -120,8 +130,8 @@ npm run eval:gestures -- <clips-dir>  # backend accuracy/latency/cost table ($1 
 - Single concurrent relay stream shared by all “live” show pages; tickets gate access, not
   the transport. Multi-show isolation is future work.
 - SQLite file is local (no replication); in-memory rate limits reset on restart.
-- Spark vision calls must fit in MAX_HOLD_MS (default 4s); `low` effort at
-  640px can exceed it and fail closed — raise the hold or stay on `minimal`.
+- Spark vision calls get VISION_TIMEOUT_MS (default 8s) inside the 12s delay;
+  the old 4s MAX_HOLD coupling aborted the latency tail.
 - Recall numbers need real labelled gesture clips; only clean-path eval ran here.
 - Live visual + audio paths are verified with a key (spark verdicts, realtime
   transcripts, waffle bleep on real speech, Turkish transcription). Mock

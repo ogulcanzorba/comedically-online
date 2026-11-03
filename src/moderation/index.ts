@@ -76,6 +76,38 @@ const SEVERITY: ModerationAction[] = ['bleep', 'blur', 'warn', 'allow'];
 /** Label on whole-chunk fallback bleeps (skipped when realtime covers the chunk). */
 export const FALLBACK_LABEL = 'fallback';
 
+/** Bleep gaps below this merge into one window (avoids stutter mute). */
+export const BLEEP_MERGE_GAP_MS = 200;
+
+/**
+ * Add a bleep to a chunk's decisions, merging with same-rule bleeps whose
+ * windows overlap or nearly touch (one occurrence = one window, no matter
+ * which source — exact, fuzzy, judge, fallback — scheduled it). The merged
+ * window is the union; label/reason stay with the earliest decision.
+ */
+export function mergeBleepWindow(existing: Decision[], incoming: Decision): Decision[] {
+  if (incoming.action !== 'bleep' || !incoming.ruleId) return [...existing, incoming];
+  const s = incoming.startMs ?? 0;
+  const e = incoming.endMs ?? 2000;
+  const overlapping = existing.filter(
+    (d) =>
+      d.action === 'bleep' &&
+      d.ruleId === incoming.ruleId &&
+      (d.startMs ?? 0) <= e + BLEEP_MERGE_GAP_MS &&
+      (d.endMs ?? 2000) >= s - BLEEP_MERGE_GAP_MS,
+  );
+  if (overlapping.length === 0) return [...existing, incoming];
+  const rest = existing.filter((d) => !overlapping.includes(d));
+  const first = overlapping[0];
+  const startMs = Math.min(s, ...overlapping.map((d) => d.startMs ?? 0));
+  const endMs = Math.max(e, ...overlapping.map((d) => d.endMs ?? 2000));
+  const merged: Decision = { ...first, startMs, endMs };
+  // Keep chronological order by window start for stable rendering.
+  const out = [...rest, merged];
+  out.sort((a, b) => (a.startMs ?? 0) - (b.startMs ?? 0));
+  return out;
+}
+
 /**
  * Map an offending word/phrase onto chunk-relative bleep windows.
  * Voice gives turn-level times, so the window is the word's proportional
@@ -200,15 +232,20 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       });
     }
   }
-  // Any video-rule flag censors the whole frame for the whole chunk: no
-  // regional boxes. Boundary straddles are covered by BLUR_PAD_CHUNKS.
+  // Video-rule flags censor the whole frame; frame-localized (precise)
+  // flags blur only their positive-frame range, the rest the whole chunk.
   for (const flag of det.flags) {
     const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
+    const precise = flag.precise === true;
+    const startMs = precise ? Math.max(0, Math.min(2000, Math.round(flag.startMs))) : 0;
+    const endMs = precise ? Math.max(startMs, Math.min(2000, Math.round(flag.endMs))) : 2000;
     decisions.push({
       action: 'blur' as const,
-      reason: rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`,
-      startMs: 0,
-      endMs: 2000,
+      reason:
+        (rule ? `rule ${rule.id}: ${rule.title}` : `visual match "${flag.label}"`) +
+        (precise ? ` (${startMs}–${endMs}ms)` : ''),
+      startMs,
+      endMs,
       box: { x: 0, y: 0, w: 1, h: 1 },
       label: flag.label,
       ...(flag.ruleId ? { ruleId: flag.ruleId } : {}),
@@ -346,7 +383,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   const primary = SEVERITY.flatMap((a) => decisions.filter((d) => d.action === a))[0];
   const errors: ChunkDebug['errors'] = {};
   if (tx.error) errors.voice = tx.error;
-  if (det.error) errors.sam = det.error;
+  if (det.error) errors.vision = det.error;
   if (judgeError) errors.judge = judgeError;
   return {
     decisions,

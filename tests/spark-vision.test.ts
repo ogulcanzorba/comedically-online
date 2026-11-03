@@ -4,11 +4,13 @@ import {
   buildVisionPrompt,
   decideVision,
   definedVisionRuleIds,
+  hysteresisHold,
   hysteresisNext,
   initialHysteresis,
   parseVisionOutput,
   sparkVisionEffort,
   sparkVisionModel,
+  visionBlurRange,
   visionHit,
   visionRuleDefs,
   visionSchema,
@@ -16,6 +18,7 @@ import {
 } from '../src/moderation/spark-vision';
 import { visionBackend } from '../src/moderation/detect-visual';
 import { frameWidth } from '../src/moderation/transcode';
+import { sparkVisionTimeoutMs } from '../src/moderation/timeout';
 import { sparkPricingMode, sparkUsdForTokens } from '../src/moderation/cost';
 import { videoBlurRules } from '../src/moderation/rulebook';
 
@@ -61,6 +64,15 @@ describe('spark vision env', () => {
     // unsure must stay below hit
     withEnv({ VISION_HIT: '0.5', VISION_UNSURE: '0.9' }, () => {
       assert.ok(visionUnsure() < 0.5);
+    });
+  });
+
+  it('gives vision calls their own 8s timeout (not MAX_HOLD)', () => {
+    withEnv({ VISION_TIMEOUT_MS: undefined, MAX_HOLD_MS: '4000' }, () => {
+      assert.equal(sparkVisionTimeoutMs(), 8000);
+    });
+    withEnv({ VISION_TIMEOUT_MS: '12000' }, () => {
+      assert.equal(sparkVisionTimeoutMs(), 12000);
     });
   });
 
@@ -223,28 +235,46 @@ describe('decideVision', () => {
 });
 
 describe('hysteresisNext', () => {
-  it('blurs the hit plus the next two clean chunks, then disarms', () => {
+  it('blurs the hit plus the next hold clean chunks, then disarms', () => {
     let s = initialHysteresis();
-    let r = hysteresisNext(s, true, 'hand-gesture-three');
+    let r = hysteresisNext(s, true, 'hand-gesture-three', 2);
     assert.equal(r.blur, true);
     s = r.state;
-    r = hysteresisNext(s, false, null);
+    r = hysteresisNext(s, false, null, 2);
     assert.equal(r.blur, true);
     s = r.state;
     assert.equal(s.armed, true);
-    r = hysteresisNext(s, false, null);
+    r = hysteresisNext(s, false, null, 2);
     assert.equal(r.blur, true);
     s = r.state;
-    r = hysteresisNext(s, false, null);
+    r = hysteresisNext(s, false, null, 2);
     assert.equal(r.blur, false);
     assert.equal(r.state.armed, false);
   });
 
+  it('defaults to holding one clean chunk (HYSTERESIS_CHUNKS)', () => {
+    withEnv({ HYSTERESIS_CHUNKS: undefined }, () => {
+      let s = initialHysteresis();
+      s = hysteresisNext(s, true, 'a').state;
+      const first = hysteresisNext(s, false, null);
+      assert.equal(first.blur, true);
+      const second = hysteresisNext(first.state, false, null);
+      assert.equal(second.blur, false);
+      assert.equal(second.state.armed, false);
+    });
+    withEnv({ HYSTERESIS_CHUNKS: 'bogus' }, () => {
+      assert.equal(hysteresisHold(), 1);
+    });
+    withEnv({ HYSTERESIS_CHUNKS: '3' }, () => {
+      assert.equal(hysteresisHold(), 3);
+    });
+  });
+
   it('a fresh hit resets the streak and rule', () => {
     let s = initialHysteresis();
-    s = hysteresisNext(s, true, 'a').state;
-    s = hysteresisNext(s, false, null).state;
-    const r = hysteresisNext(s, true, 'b');
+    s = hysteresisNext(s, true, 'a', 2).state;
+    s = hysteresisNext(s, false, null, 2).state;
+    const r = hysteresisNext(s, true, 'b', 2);
     assert.equal(r.blur, true);
     assert.deepEqual(r.state, { armed: true, cleanStreak: 0, lastRuleId: 'b' });
   });
@@ -253,6 +283,20 @@ describe('hysteresisNext', () => {
     const r = hysteresisNext(initialHysteresis(), false, null);
     assert.equal(r.blur, false);
     assert.equal(r.state.armed, false);
+  });
+});
+
+describe('visionBlurRange', () => {
+  it('spans first-to-last positive current frame ± margin', () => {
+    // 4 current frames at 250/750/1250/1750; gesture on the last two.
+    assert.deepEqual(visionBlurRange([2, 3], 0, 4), { startMs: 1000, endMs: 2000 });
+    assert.deepEqual(visionBlurRange([5], 2, 4), { startMs: 1500, endMs: 2000 });
+    assert.deepEqual(visionBlurRange([2], 2, 4), { startMs: 0, endMs: 500 });
+  });
+
+  it('treats prev-chunk positives as context (head sliver only)', () => {
+    assert.deepEqual(visionBlurRange([0, 1], 2, 4), { startMs: 0, endMs: 250 });
+    assert.deepEqual(visionBlurRange([0, 4], 2, 4), { startMs: 1000, endMs: 1500 });
   });
 });
 

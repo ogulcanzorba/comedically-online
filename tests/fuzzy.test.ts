@@ -2,6 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   fuzzyThreshold,
+  isNearExact,
   levenshtein,
   matchBanned,
   normalizeTrToken,
@@ -94,6 +95,14 @@ describe('matchBanned', () => {
     assert.equal(hits.length, 2);
     assert.equal(hits[0].ordinal, 0);
     assert.equal(hits[1].ordinal, 1);
+  });
+});
+
+describe('isNearExact', () => {
+  it('skips the judge at distance 0-1, consults at 2+', () => {
+    assert.equal(isNearExact(0), true);
+    assert.equal(isNearExact(1), true);
+    assert.equal(isNearExact(2), false);
   });
 });
 

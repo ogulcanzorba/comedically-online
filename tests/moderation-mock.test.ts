@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { moderateChunk, bleepWindowsForTarget } from '../src/moderation/index';
+import { moderateChunk, bleepWindowsForTarget, mergeBleepWindow } from '../src/moderation/index';
 import { parseSamOutput } from '../src/moderation/detect-visual';
 import { SpendTracker } from '../src/moderation/cost';
 import { MOCK_BANNED_WORD } from '../src/moderation/mock';
@@ -152,5 +152,43 @@ describe('parseSamOutput', () => {
 
   it('returns no records for an empty lane (zero matches)', () => {
     assert.deepEqual(parseSamOutput(''), []);
+  });
+});
+
+describe('mergeBleepWindow', () => {
+  const bleep = (ruleId: string, startMs: number, endMs: number, label = 'realtime') => ({
+    action: 'bleep' as const,
+    reason: 't',
+    ruleId,
+    startMs,
+    endMs,
+    label,
+  });
+
+  it('merges same-rule overlaps into one union window (exact + fuzzy double-fire)', () => {
+    const out = mergeBleepWindow(
+      [bleep('r', 960, 2000, 'realtime')],
+      bleep('r', 960, 2000, 'realtime-fuzzy'),
+    );
+    assert.equal(out.length, 1);
+    assert.deepEqual([out[0].startMs, out[0].endMs], [960, 2000]);
+    assert.equal(out[0].label, 'realtime'); // earliest keeps its label
+  });
+
+  it('unions partial overlaps and near touches, keeps the rest', () => {
+    const out = mergeBleepWindow(
+      [bleep('r', 100, 500), bleep('r', 1500, 1800), bleep('other', 100, 500)],
+      bleep('r', 400, 900),
+    );
+    const r = out.filter((d) => d.ruleId === 'r');
+    assert.equal(r.length, 2);
+    assert.deepEqual([r[0].startMs, r[0].endMs], [100, 900]);
+    assert.deepEqual([r[1].startMs, r[1].endMs], [1500, 1800]);
+    assert.equal(out.filter((d) => d.ruleId === 'other').length, 1);
+  });
+
+  it('passes through unlabeled and non-bleep decisions untouched', () => {
+    const blur = { action: 'blur' as const, reason: 't', startMs: 0, endMs: 2000 };
+    assert.equal(mergeBleepWindow([blur], bleep('r', 0, 2000)).length, 2);
   });
 });

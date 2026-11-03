@@ -2,18 +2,54 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { WebSocketServer } from 'ws';
 import {
+  estimateWordMs,
   mapRangeToChunks,
-  REALTIME_BLEEP_POST_MS,
-  REALTIME_BLEEP_PRE_MS,
+  realtimeBleepWindow,
+  realtimeLagMs,
   RealtimeSession,
   REALTIME_FRAME_BYTES,
+  WORD_GUARD_MS,
 } from '../src/moderation/realtime';
 
 describe('realtime bleep window', () => {
-  it('covers [t-1500, t+300]', () => {
-    assert.equal(REALTIME_BLEEP_PRE_MS, 1500);
-    assert.equal(REALTIME_BLEEP_POST_MS, 300);
-    assert.equal(REALTIME_FRAME_BYTES, 2560);
+  it('lags, guards, and word estimates have sane defaults', () => {
+    const saved = process.env.REALTIME_LAG_MS;
+    delete process.env.REALTIME_LAG_MS;
+    try {
+      assert.equal(REALTIME_FRAME_BYTES, 2560);
+      assert.equal(realtimeLagMs(), 250);
+      assert.equal(WORD_GUARD_MS, 250);
+      assert.equal(estimateWordMs(6), 540);
+      assert.equal(estimateWordMs(1), 300);
+      assert.equal(estimateWordMs(40), 1000);
+      process.env.REALTIME_LAG_MS = '400';
+      assert.equal(realtimeLagMs(), 400);
+      process.env.REALTIME_LAG_MS = 'junk';
+      assert.equal(realtimeLagMs(), 250);
+    } finally {
+      if (saved === undefined) delete process.env.REALTIME_LAG_MS;
+      else process.env.REALTIME_LAG_MS = saved;
+    }
+  });
+
+  it('centers word start-250 .. word end+250 on the lag-corrected frontier', () => {
+    const saved = process.env.REALTIME_LAG_MS;
+    delete process.env.REALTIME_LAG_MS;
+    try {
+      // Measured: word [1266,1768], first matching partial at t=2000.
+      const w = realtimeBleepWindow(2000, 6);
+      assert.deepEqual(w, { startMs: 960, endMs: 2000 });
+      assert.ok(w.startMs <= 1266 && w.endMs >= 1768, 'covers the true word');
+    } finally {
+      if (saved === undefined) delete process.env.REALTIME_LAG_MS;
+      else process.env.REALTIME_LAG_MS = saved;
+    }
+  });
+
+  it('clamps negative heads to zero', () => {
+    const w = realtimeBleepWindow(100, 6);
+    assert.equal(w.startMs, 0);
+    assert.ok(w.endMs > 0);
   });
 });
 
