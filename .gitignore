@@ -5,7 +5,8 @@ out/
 
 # env (never commit real keys)
 .env
-.env*.local
+.env.*
+!.env.example
 
 # sqlite (local file DB; recreated by npm run seed)
 *.db
@@ -20,3 +21,12 @@ tsconfig.tsbuildinfo
 
 # sampled SAM input frames (DEBUG_FRAMES=1)
 /debug-frames/
+
+# captured media + chunk dumps (moderation inputs, never commit)
+/chunks/
+*.webm
+*.wav
+*.mp4
+
+# local seed database content
+data/
