@@ -17,3 +17,6 @@ npm-debug.log*
 coverage/
 .DS_Store
 tsconfig.tsbuildinfo
+
+# sampled SAM input frames (DEBUG_FRAMES=1)
+/debug-frames/

@@ -4,6 +4,7 @@ import type {
   ModerationAction,
   ModerationLogEntry,
   ModerationMode,
+  SamBreakdown,
   VisualFlag,
 } from './types';
 import type { TranscriptTurn } from './types';
@@ -123,11 +124,18 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
     costUsd: number;
     ms: number;
     error: string | null;
+    detail?: SamBreakdown;
   }> {
     const start = Date.now();
     try {
       const v = await detectVisual(args.video, args.seq, mode);
-      return { flags: v.flags, costUsd: v.costUsd, ms: Date.now() - start, error: null };
+      return {
+        flags: v.flags,
+        costUsd: v.costUsd,
+        ms: Date.now() - start,
+        error: null,
+        ...(v.detail ? { detail: v.detail } : {}),
+      };
     } catch (e) {
       return { flags: [], costUsd: 0, ms: Date.now() - start, error: errorDetail(e) };
     }
@@ -276,6 +284,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       judgeSkipped,
       timingsMs: { queueMs, voiceMs: tx.ms, samMs: det.ms, judgeMs },
       errors,
+      ...(det.detail ? { samBreakdown: det.detail } : {}),
     },
   };
 }

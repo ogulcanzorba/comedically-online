@@ -1,4 +1,4 @@
-export const DEFAULT_PLAYBACK_DELAY_MS = 20_000;
+export const DEFAULT_PLAYBACK_DELAY_MS = 12_000;
 
 export interface BufferedChunk<T> {
   data: T;

@@ -2,7 +2,10 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   conceptsFromRulebook,
+  debugFramesDir,
   flagsForImageHit,
+  framesPerChunk,
+  meanConfidence,
   parseSamOutput,
 } from '../src/moderation/detect-visual';
 
@@ -15,6 +18,54 @@ describe('parseSamOutput image shape', () => {
       id: 0,
       box: { x: 80 / 320, y: 70 / 180, w: 49 / 320, h: 49 / 180 },
     });
+  });
+
+  it('captures confidence when the model reports it', () => {
+    const records = parseSamOutput(
+      '<0f>0<|box;x1=137;y1=168;x2=155;y2=188;w=320;h=414;c=0.6012461185455322|>',
+    );
+    assert.equal(records.length, 1);
+    assert.ok(Math.abs((records[0].confidence ?? 0) - 0.6012461185455322) < 1e-12);
+  });
+});
+
+describe('meanConfidence', () => {
+  it('averages reported confidences and nulls out when absent', () => {
+    const box = { x: 0, y: 0, w: 0.1, h: 0.1 };
+    assert.ok(
+      Math.abs(
+        (meanConfidence([
+          { frame: 0, id: 0, box, confidence: 0.6 },
+          { frame: 0, id: 1, box, confidence: 0.8 },
+        ]) ?? 0) - 0.7,
+      ) < 1e-12,
+    );
+    assert.equal(meanConfidence([{ frame: 0, id: 0, box }]), null);
+    assert.equal(meanConfidence([]), null);
+  });
+});
+
+describe('sampling env', () => {
+  it('defaults to 1 frame per chunk, 2 on opt-in', () => {
+    const saved = process.env.SAM_FRAMES_PER_CHUNK;
+    delete process.env.SAM_FRAMES_PER_CHUNK;
+    assert.equal(framesPerChunk(), 1);
+    process.env.SAM_FRAMES_PER_CHUNK = '2';
+    assert.equal(framesPerChunk(), 2);
+    process.env.SAM_FRAMES_PER_CHUNK = '3';
+    assert.equal(framesPerChunk(), 1);
+    if (saved === undefined) delete process.env.SAM_FRAMES_PER_CHUNK;
+    else process.env.SAM_FRAMES_PER_CHUNK = saved;
+  });
+
+  it('exposes the debug frames dir only on opt-in', () => {
+    const saved = process.env.DEBUG_FRAMES;
+    delete process.env.DEBUG_FRAMES;
+    assert.equal(debugFramesDir(), null);
+    process.env.DEBUG_FRAMES = '1';
+    assert.ok(debugFramesDir()?.endsWith('debug-frames'));
+    if (saved === undefined) delete process.env.DEBUG_FRAMES;
+    else process.env.DEBUG_FRAMES = saved;
   });
 });
 
@@ -48,6 +99,13 @@ describe('flagsForImageHit', () => {
 
   it('returns no flags without records', () => {
     assert.deepEqual(flagsForImageHit('concept', 'rule', []), []);
+  });
+
+  it('centers the ±1s window on the sampled frame time', () => {
+    const early = flagsForImageHit('c', 'r', [{ frame: 0, id: 0, box }], 500);
+    assert.deepEqual([early[0].startMs, early[0].endMs], [0, 1500]);
+    const late = flagsForImageHit('c', 'r', [{ frame: 0, id: 0, box }], 1500);
+    assert.deepEqual([late[0].startMs, late[0].endMs], [500, 2000]);
   });
 });
 

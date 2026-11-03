@@ -75,7 +75,7 @@ function formatScene(seq: number): string {
  * In-place broadcast studio: camera/mic capture, relay publish, start/stop.
  * Lives on the pre-live page next to the moderation log. Violation toasts and
  * the timeline come from the relay's publisher log channel (near real time);
- * the log below shows the same moments as they air on the 20s delay.
+ * the log below shows the same moments as they air on the 12s delay.
  */
 export function BroadcastStudio({ showId, accepted }: { showId: string; accepted: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -361,7 +361,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
           <p className="mt-1 text-xs text-neutral-500">
             {violations.length === 0
               ? 'No violations — clean set so far.'
-              : `${violations.length} flagged moment${violations.length === 1 ? '' : 's'} (clips below).`}
+              : `${violations.length} flagged moment${violations.length === 1 ? '' : 's'} (recap below).`}
           </p>
         </div>
       )}

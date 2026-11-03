@@ -75,4 +75,25 @@ export interface ChunkDebug {
   timingsMs: ChunkTimings;
   /** Raw stage errors (sanitized, truncated, never secrets). Omitted when empty. */
   errors: { voice?: string; sam?: string; judge?: string };
+  /** Per-concept SAM breakdown (live visual checks only). */
+  samBreakdown?: SamBreakdown;
+}
+
+/** One concept's SAM image result inside a chunk. */
+export interface SamConceptDebug {
+  ruleId: string;
+  /** Sampled frames the concept ran on (1, or 2 with SAM_FRAMES_PER_CHUNK=2). */
+  frames: number;
+  boxes: number;
+  /** Mean box confidence when the model reports it, else null. */
+  confidence: number | null;
+  ms: number;
+  /** True when a video confirm call refined this concept's flags. */
+  confirmed: boolean;
+}
+
+/** Where one chunk's visual time went: JPEG extract plus per-concept calls. */
+export interface SamBreakdown {
+  extractMs: number;
+  concepts: SamConceptDebug[];
 }

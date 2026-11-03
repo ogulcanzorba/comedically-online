@@ -2,40 +2,18 @@ import { useSyncExternalStore } from 'react';
 
 /**
  * Device-local broadcast recording. The studio stashes every 2s MediaRecorder
- * blob it sends; violation clips and the full download are byte-slices of
- * those blobs (init segment + clusters), assembled lazily as object URLs.
+ * blob it sends; the full broadcast (original and censored views) is a
+ * byte-concatenation of those blobs, assembled lazily as an object URL.
  * Everything stays in this tab's memory; nothing is uploaded anywhere.
  */
-
-/** Chunks kept on each side of a flagged chunk: ±1 chunk ≈ ±2s ("about 3s"). */
-const CLIP_RADIUS_CHUNKS = 1;
 
 export interface LocalChunk {
   seq: number;
   blob: Blob;
 }
 
-export interface ClipRef {
-  url: string;
-  /** Clip span in scene seconds (2s per chunk). */
-  startS: number;
-  endS: number;
-  centerSeq: number;
-}
-
-/** Pure: which stored seqs form the clip around centerSeq. Exported for tests. */
-export function clipRange(centerSeq: number, seqs: number[]): number[] {
-  const available = new Set(seqs);
-  const out: number[] = [];
-  for (let s = centerSeq - CLIP_RADIUS_CHUNKS; s <= centerSeq + CLIP_RADIUS_CHUNKS; s++) {
-    if (s >= 0 && available.has(s)) out.push(s);
-  }
-  return out;
-}
-
 class LocalRecordingStore {
   private chunks: LocalChunk[] = [];
-  private clipUrls = new Map<string, string>();
   private fullUrl: string | null = null;
   private listeners = new Set<() => void>();
   private _version = 0;
@@ -68,8 +46,6 @@ class LocalRecordingStore {
   }
 
   private revokeAll(): void {
-    for (const url of this.clipUrls.values()) URL.revokeObjectURL(url);
-    this.clipUrls.clear();
     if (this.fullUrl) URL.revokeObjectURL(this.fullUrl);
     this.fullUrl = null;
   }
@@ -98,34 +74,6 @@ class LocalRecordingStore {
 
   private sorted(): LocalChunk[] {
     return [...this.chunks].sort((a, b) => a.seq - b.seq);
-  }
-
-  /**
-   * Clip around a flagged chunk: the flagged 2s chunk ± one chunk, i.e.
-   * ~2s before its start to ~2s after its end. Null until its first blob lands.
-   * Server and studio seqs agree (the studio sends strictly in order), so the
-   * moderation entry's seq indexes this store directly.
-   */
-  clipFor(centerSeq: number): ClipRef | null {
-    const sorted = this.sorted();
-    const range = clipRange(
-      centerSeq,
-      sorted.map((c) => c.seq),
-    );
-    if (range.length === 0) return null;
-    const key = range.join(',');
-    let url = this.clipUrls.get(key);
-    if (!url) {
-      const parts: Blob[] = [];
-      for (const s of range) {
-        const found = sorted.find((c) => c.seq === s);
-        if (found) parts.push(found.blob);
-      }
-      if (parts.length === 0) return null;
-      url = URL.createObjectURL(new Blob(parts, { type: 'video/webm' }));
-      this.clipUrls.set(key, url);
-    }
-    return { url, startS: range[0] * 2, endS: range[range.length - 1] * 2 + 2, centerSeq };
   }
 
   /** Whole broadcast, in seq order, as one playable WebM. */

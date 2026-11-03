@@ -22,7 +22,7 @@ interface QueuedChunk {
 export function ShowPlayer() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const windowsRef = useRef<DecisionWindow[]>([]);
-  const [status, setStatus] = useState('Connecting… (stream runs ~20s behind live)');
+  const [status, setStatus] = useState('Connecting… (stream runs ~12s behind live)');
   const [active, setActive] = useState<Decision[]>([]);
   const [sceneAt, setSceneAt] = useState(0);
 
@@ -111,7 +111,7 @@ export function ShowPlayer() {
       if (pendingMeta) {
         queue.push({ meta: pendingMeta, bytes: ev.data as ArrayBuffer });
         pendingMeta = null;
-        setStatus('Live (about 20s behind the stage)');
+        setStatus('Live (about 12s behind the stage)');
         pump();
       }
     };

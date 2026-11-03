@@ -1,12 +1,13 @@
 import { activeBlursAt, isBleepedAt, type CensorPlan } from './censor-plan';
 
 /**
- * Render a censored clip file in the browser: video frames are redrawn on a
+ * Render a censored video file in the browser: frames are redrawn on a
  * canvas with blur regions applied, audio runs through a gain node muted
  * during bleep windows, and the result is re-encoded to WebM. Everything
- * happens on-device; the source clip never leaves the tab.
+ * happens on-device; the source never leaves the tab. Rendering runs in
+ * real time, so a full broadcast takes as long as the broadcast did.
  */
-export async function renderCensoredClip(
+export async function renderCensoredVideo(
   srcUrl: string,
   plan: CensorPlan,
   onProgress?: (fraction: number) => void,
@@ -18,7 +19,7 @@ export async function renderCensoredClip(
   video.src = srcUrl;
   await new Promise<void>((resolve, reject) => {
     video.onloadedmetadata = () => resolve();
-    video.onerror = () => reject(new Error('could not decode clip'));
+    video.onerror = () => reject(new Error('could not decode video'));
   });
   const width = video.videoWidth || 640;
   const height = video.videoHeight || 480;
@@ -78,14 +79,16 @@ export async function renderCensoredClip(
   try {
     video.currentTime = 0;
     await video.play().catch(() => {
-      throw new Error('clip playback blocked');
+      throw new Error('playback blocked');
     });
     recorder.start(500);
     draw();
     await new Promise<void>((resolve, reject) => {
       video.onended = () => resolve();
       video.onerror = () => reject(new Error('decode failed during render'));
-      window.setTimeout(() => reject(new Error('render timed out')), 60_000);
+      // Real-time render: allow the full duration plus startup margin.
+      const budgetMs = Math.max(60_000, (plan.durationS + 30) * 1000);
+      window.setTimeout(() => reject(new Error('render timed out')), budgetMs);
     });
   } finally {
     cancelAnimationFrame(raf);

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   extractMiddleJpeg,
+  extractSampleJpegs,
   preassembleChunk,
   resolveFfmpeg,
   splitMjpegStream,
@@ -146,5 +147,44 @@ describe('extractMiddleJpeg', () => {
 
   it('rejects when no ffmpeg is available', async () => {
     await assert.rejects(extractMiddleJpeg(Buffer.from('x'), null), /no ffmpeg available/);
+  });
+});
+
+describe('extractSampleJpegs', () => {
+  function jpegShim(dir: string, payload: Buffer): string {
+    const path = join(dir, 'ffmpeg-samples.sh');
+    writeFileSync(
+      path,
+      `#!/bin/sh\nprintf '${payload.toString('base64')}' | base64 -d`,
+    );
+    chmodSync(path, 0o755);
+    return path;
+  }
+  const soi = Buffer.from([0xff, 0xd8]);
+  const eoi = Buffer.from([0xff, 0xd9]);
+  const frame = (tag: string) => Buffer.concat([soi, Buffer.from(tag), eoi]);
+  const eight = Buffer.concat(['F0', 'F1', 'F2', 'F3', 'F4', 'F5', 'F6', 'F7'].map(frame));
+
+  it('samples the middle frame for count 1', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const out = await extractSampleJpegs(Buffer.from('WEBMBYTES'), 1, jpegShim(dir, eight));
+    assert.equal(out.length, 1);
+    assert.ok(out[0].includes('F4'), `picked: ${out[0].toString()}`);
+  });
+
+  it('samples quartile frames for count 2', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const out = await extractSampleJpegs(Buffer.from('WEBMBYTES'), 2, jpegShim(dir, eight));
+    assert.equal(out.length, 2);
+    assert.ok(out[0].includes('F2'), `first: ${out[0].toString()}`);
+    assert.ok(out[1].includes('F6'), `second: ${out[1].toString()}`);
+  });
+
+  it('rejects when the window decodes to zero frames', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    await assert.rejects(
+      extractSampleJpegs(Buffer.from('WEBMBYTES'), 2, jpegShim(dir, Buffer.from('nojpeg'))),
+      /zero frames/,
+    );
   });
 });

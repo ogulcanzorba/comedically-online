@@ -1,46 +1,75 @@
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import OpenAI from 'openai';
-import type { ModerationMode, NormBox, VisualFlag } from './types';
+import type { ModerationMode, NormBox, SamBreakdown, SamConceptDebug, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
 import { samUsdForFrames, samUsdForImages } from './cost';
 import { samTimeoutMs, startTimeout } from './timeout';
-import { extractMiddleJpeg, webmToMp4 } from './transcode';
+import { extractSampleJpegs, webmToMp4 } from './transcode';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
 const CHUNK_MS = 2000;
-/** The sampled middle frame sits at ~t=1.0s of the chunk. */
-const IMAGE_FRAME_MS = CHUNK_MS / 2;
-/** An image hit blurs the frame time ±1s (the whole 2s chunk). */
+/** An image hit blurs the frame time ±1s. */
 const IMAGE_PAD_MS = 1000;
+/** Sample times (chunk-relative ms) for 1- and 2-frame sampling. */
+const SAMPLE_TIMES: Record<1 | 2, number[]> = { 1: [CHUNK_MS / 2], 2: [500, 1500] };
 
 export interface ParsedRecord {
   frame: number;
   id: number;
   box: NormBox;
+  confidence?: number;
+}
+
+/**
+ * Frames sampled per chunk for SAM image calls. Two frames catch briefer
+ * gestures (t≈0.5s/1.5s) at twice the image cost; wall latency stays flat.
+ */
+export function framesPerChunk(): 1 | 2 {
+  return process.env.SAM_FRAMES_PER_CHUNK === '2' ? 2 : 1;
+}
+
+/** Debug dir for sampled JPEGs when DEBUG_FRAMES=1, else null. */
+export function debugFramesDir(): string | null {
+  return process.env.DEBUG_FRAMES === '1' ? join(process.cwd(), 'debug-frames') : null;
 }
 
 /**
  * Parse SAM 3.1 output_text lines into normalized boxes.
- * Line shape: <Nf>id<|box;x1=..;y1=..;x2=..;y2=..;w=..;h=..|>...
+ * Line shape: <Nf>id<|box;x1=..;y1=..;x2=..;y2=..;w=..;h=..[;c=..]|>...
+ * Confidence (c=) is present only when requested via metadata; parsing stays
+ * backward compatible with responses that omit it.
  */
 export function parseSamOutput(text: string): ParsedRecord[] {
   const records: ParsedRecord[] = [];
   const frameRe = /<(\d+)f>((?:\d+<\|box;[^|]*\|>(?:<\|mask;[^|]*\|>)?,?)*)/g;
-  const boxRe = /(\d+)<\|box;x1=(\d+);y1=(\d+);x2=(\d+);y2=(\d+);w=(\d+);h=(\d+)/g;
+  const boxRe =
+    /(\d+)<\|box;x1=(\d+);y1=(\d+);x2=(\d+);y2=(\d+);w=(\d+);h=(\d+)(?:;c=([\d.]+))?/g;
   for (const frameMatch of text.matchAll(frameRe)) {
     const frame = Number(frameMatch[1]);
     const body = frameMatch[2];
     for (const boxMatch of body.matchAll(boxRe)) {
       const [, id, x1, y1, x2, y2, w, h] = boxMatch.map(Number);
       if (!w || !h) continue;
+      const confRaw = boxMatch[8];
+      const confidence = confRaw === undefined ? NaN : Number(confRaw);
       records.push({
         frame,
         id,
         box: { x: x1 / w, y: y1 / h, w: (x2 - x1) / w, h: (y2 - y1) / h },
+        ...(Number.isFinite(confidence) ? { confidence } : {}),
       });
     }
   }
   return records;
+}
+
+/** Mean confidence over records that report one, else null. */
+export function meanConfidence(records: ParsedRecord[]): number | null {
+  const values = records.map((r) => r.confidence).filter((c): c is number => typeof c === 'number');
+  if (values.length === 0) return null;
+  return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
 /** One concept per SAM request, drawn from the rulebook's video rules. */
@@ -71,6 +100,7 @@ async function segmentMedia(
     const stream = client.responses.stream(
       {
         model: SAM_MODEL,
+        metadata: { include_confidence: 'true' },
         input: [
           {
             type: 'message',
@@ -158,6 +188,7 @@ export function flagsForImageHit(
   concept: string,
   ruleId: string,
   records: ParsedRecord[],
+  frameMs = CHUNK_MS / 2,
 ): VisualFlag[] {
   const byId = new Map<number, ParsedRecord[]>();
   for (const r of records) {
@@ -169,8 +200,8 @@ export function flagsForImageHit(
   for (const [, list] of byId) {
     list.sort((a, b) => a.frame - b.frame);
     flags.push({
-      startMs: Math.max(0, IMAGE_FRAME_MS - IMAGE_PAD_MS),
-      endMs: Math.min(CHUNK_MS, IMAGE_FRAME_MS + IMAGE_PAD_MS),
+      startMs: Math.max(0, frameMs - IMAGE_PAD_MS),
+      endMs: Math.min(CHUNK_MS, frameMs + IMAGE_PAD_MS),
       box: list[Math.floor(list.length / 2)].box,
       label: concept,
       ruleId,
@@ -179,11 +210,26 @@ export function flagsForImageHit(
   return flags;
 }
 
+function saveDebugFrames(seq: number, jpegs: Buffer[]): void {
+  const dir = debugFramesDir();
+  if (!dir) return;
+  try {
+    mkdirSync(dir, { recursive: true });
+    jpegs.forEach((jpg, i) => {
+      const name = jpegs.length === 1 ? `chunk${seq}.jpg` : `chunk${seq}-f${i}.jpg`;
+      writeFileSync(join(dir, name), jpg);
+    });
+    console.log(`[sam] chunk #${seq} frames saved to ${dir}/`);
+  } catch (e) {
+    console.log(`[sam] chunk #${seq} frame save failed: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 export async function detectVisual(
   video: Buffer | null,
   seq: number,
   mode: ModerationMode,
-): Promise<{ flags: VisualFlag[]; costUsd: number }> {
+): Promise<{ flags: VisualFlag[]; costUsd: number; detail?: SamBreakdown }> {
   if (mode === 'mock') {
     // Scripted stand-ins, alternating the rulebook's video rules.
     const slot = seq % 6;
@@ -207,42 +253,83 @@ export async function detectVisual(
     apiKey: requireKey(),
     fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
   });
-  // Frame sampling: one 320px JPEG from the chunk middle per concept (~0.5s
+  // Frame sampling: 320px JPEG(s) from the chunk middle per concept (~0.5s
   // per call instead of 4-18s for video). Failures throw into the
   // pipeline's visual fail handling (closed/open), unchanged.
-  const jpg = await extractMiddleJpeg(video);
-  const imageDataUrl = `data:image/jpeg;base64,${jpg.toString('base64')}`;
-  // One SAM image request per concept, all in flight at once.
+  const frames = framesPerChunk();
+  const sampleTimes = SAMPLE_TIMES[frames];
+  const tExtract = Date.now();
+  const jpegs = await extractSampleJpegs(video, frames);
+  const extractMs = Date.now() - tExtract;
+  saveDebugFrames(seq, jpegs);
+  const urls = jpegs.map((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`);
+  // One SAM image request per concept per frame, all in flight at once.
   const settled = await Promise.all(
     conceptsFromRulebook().map(async ({ concept, ruleId }) => {
-      const { records, usage } = await segmentMedia(client, concept, {
-        type: 'input_image',
-        image_url: imageDataUrl,
+      const t0 = Date.now();
+      const perFrame = await Promise.all(
+        urls.map((image_url) =>
+          segmentMedia(client, concept, { type: 'input_image', image_url }),
+        ),
+      );
+      const ms = Date.now() - t0;
+      let costUsd = 0;
+      const imageFlags: VisualFlag[] = [];
+      const allRecords: ParsedRecord[] = [];
+      perFrame.forEach(({ records, usage }, i) => {
+        costUsd += samUsdForImages(usage?.imagesProcessed ?? 1);
+        allRecords.push(...records);
+        imageFlags.push(...flagsForImageHit(concept, ruleId, records, sampleTimes[i]));
       });
-      let costUsd = samUsdForImages(usage?.imagesProcessed ?? 1);
-      const imageFlags = flagsForImageHit(concept, ruleId, records);
-      if (imageFlags.length === 0) return { flags: imageFlags, costUsd };
-      // Confirm step, positive chunks only: a 320px video call refines the
-      // blur window. Any failure keeps the image flag (fail-closed).
-      try {
-        const mp4 = await webmToMp4(video, undefined, 320);
-        const confirm = await segmentMedia(client, concept, {
-          type: 'input_video',
-          video_url: `data:video/mp4;base64,${mp4.toString('base64')}`,
-        });
-        costUsd += samUsdForFrames(confirm.usage?.videoFramesProcessed ?? confirm.frames);
-        const precise = flagsForConcept(concept, ruleId, confirm.records, confirm.frames);
-        return { flags: precise.length > 0 ? precise : imageFlags, costUsd };
-      } catch {
-        return { flags: imageFlags, costUsd };
+      const boxes = allRecords.length;
+      const confidence = meanConfidence(allRecords);
+      let confirmed = false;
+      let flags = imageFlags;
+      if (imageFlags.length > 0) {
+        // Confirm step, positive chunks only: a 320px video call refines the
+        // blur window. Any failure keeps the image flags (fail-closed).
+        try {
+          const mp4 = await webmToMp4(video, undefined, 320);
+          const confirm = await segmentMedia(client, concept, {
+            type: 'input_video',
+            video_url: `data:video/mp4;base64,${mp4.toString('base64')}`,
+          });
+          costUsd += samUsdForFrames(confirm.usage?.videoFramesProcessed ?? confirm.frames);
+          const precise = flagsForConcept(concept, ruleId, confirm.records, confirm.frames);
+          if (precise.length > 0) {
+            flags = precise;
+            confirmed = true;
+          }
+        } catch {
+          // Keep the image flags.
+        }
       }
+      console.log(
+        `[sam] chunk #${seq} rule=${ruleId} frames=${perFrame.length} ` +
+          `boxes=${boxes} conf=${confidence === null ? 'n/a' : confidence.toFixed(2)} ` +
+          `ms=${ms}${confirmed ? ' confirmed' : ''}`,
+      );
+      const conceptDebug: SamConceptDebug = {
+        ruleId,
+        frames: perFrame.length,
+        boxes,
+        confidence,
+        ms,
+        confirmed,
+      };
+      return { flags, costUsd, conceptDebug };
     }),
   );
   const flags: VisualFlag[] = [];
   let costUsd = 0;
+  const concepts: SamConceptDebug[] = [];
   for (const s of settled) {
     costUsd += s.costUsd;
     flags.push(...s.flags);
+    concepts.push(s.conceptDebug);
   }
-  return { flags, costUsd };
+  console.log(
+    `[sam] chunk #${seq} extract=${extractMs}ms total=+${costUsd.toFixed(4)}`,
+  );
+  return { flags, costUsd, detail: { extractMs, concepts } };
 }

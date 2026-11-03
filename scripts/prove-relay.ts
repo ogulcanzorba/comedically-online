@@ -1,6 +1,6 @@
 /**
  * End-to-end relay proof: publisher -> StreamHost -> viewer.
- * Uses the REAL default 20s delay. Exits non-zero on any failed assertion.
+ * Uses the REAL default delay. Exits non-zero on any failed assertion.
  */
 import { createServer } from 'http';
 import { WebSocket, WebSocketServer } from 'ws';
@@ -21,9 +21,10 @@ function assert(cond: boolean, msg: string): void {
 }
 
 async function main(): Promise<void> {
-  assert(DEFAULT_PLAYBACK_DELAY_MS === 20_000, 'default delay is exactly 20s');
+  const DELAY = DEFAULT_PLAYBACK_DELAY_MS;
+  assert(DELAY === 12_000, `default delay is exactly 12s (got ${DELAY}ms)`);
 
-  const host = new StreamHost(); // real 20s delay
+  const host = new StreamHost(); // real default delay
   const server = createServer();
   const wss = new WebSocketServer({ server });
   wss.on('connection', (ws, req) => {
@@ -68,8 +69,8 @@ async function main(): Promise<void> {
   const t1 = Date.now();
   publisher.send(Buffer.from('fake-chunk-1-bytes'));
 
-  // Wait for both chunks: last publish + 20s delay + tolerance.
-  await new Promise((r) => setTimeout(r, 20_000 + TOLERANCE_MS));
+  // Wait for both chunks: last publish + delay + tolerance.
+  await new Promise((r) => setTimeout(r, DELAY + TOLERANCE_MS));
   assert(received.length === 2, `viewer received 2 chunks (got ${received.length})`);
 
   const [first, second] = received;
@@ -82,14 +83,14 @@ async function main(): Promise<void> {
   const d0 = first.atMs - t0;
   const d1 = second.atMs - t1;
   console.log(`  info: chunk0 delay ${d0}ms, chunk1 delay ${d1}ms`);
-  assert(d0 >= 20_000 && d0 < 20_000 + TOLERANCE_MS, `chunk0 delayed ~20s (got ${d0}ms)`);
-  assert(d1 >= 20_000 && d1 < 20_000 + TOLERANCE_MS, `chunk1 delayed ~20s (got ${d1}ms)`);
+  assert(d0 >= DELAY && d0 < DELAY + TOLERANCE_MS, `chunk0 delayed ~${DELAY}ms (got ${d0}ms)`);
+  assert(d1 >= DELAY && d1 < DELAY + TOLERANCE_MS, `chunk1 delayed ~${DELAY}ms (got ${d1}ms)`);
   assert(Array.isArray(first.meta.decisions), 'chunk meta carries decisions array');
 
   // Moderation log reaches the studio.
   assert(viewerLogs.length >= 2, `publisher got log entries (got ${viewerLogs.length})`);
 
-  // Late joiner gets the init segment immediately, not after 20s.
+  // Late joiner gets the init segment immediately, not after the delay.
   // Attach the handler before open: the server sends init on connection.
   const late = new WebSocket(`ws://127.0.0.1:${port}/ws?role=viewer`);
   const lateGotPromise = new Promise<ChunkMetaMessage>((resolve) => {
@@ -113,7 +114,9 @@ async function main(): Promise<void> {
   late.close();
   host.close();
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  console.log('RELAY PROOF PASSED: 20s delay, order, init-first, log, late-join all verified.');
+  console.log(
+  `RELAY PROOF PASSED: ${DELAY}ms delay, order, init-first, log, late-join all verified.`,
+);
 }
 
 void main();

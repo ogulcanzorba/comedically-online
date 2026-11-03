@@ -37,6 +37,40 @@ export function preassembleChunk(
   return Buffer.concat([initSegment, chunk]);
 }
 
+/** Run ffmpeg with piped stdin/stdout, capturing stdout or a labeled error. */
+function runPiped(bin: string, args: string[], input: Buffer, what: string): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    const child = spawn(bin, args, { signal: AbortSignal.timeout(TRANSCODE_TIMEOUT_MS) });
+    const out: Buffer[] = [];
+    const err: Buffer[] = [];
+    child.stdout.on('data', (d: Buffer) => out.push(d));
+    child.stderr.on('data', (d: Buffer) => err.push(d));
+    child.on('error', (e) => reject(new Error(`ffmpeg failed to start: ${e.message}`)));
+    child.on('close', (code, signal) => {
+      if (code === 0) {
+        resolve(Buffer.concat(out));
+        return;
+      }
+      const detail = Buffer.concat(err).toString('utf8').trim().slice(0, 300);
+      reject(
+        new Error(
+          `${what} failed (code ${code ?? '?'}${signal ? `, ${signal}` : ''})${detail ? `: ${detail}` : ''}`,
+        ),
+      );
+    });
+    child.stdin.on('error', () => {
+      // stdin breaks when ffmpeg exits early on invalid input; close carries the error.
+    });
+    child.stdin.end(input);
+  });
+}
+
+function noFfmpeg(): Promise<never> {
+  return Promise.reject(
+    new Error('no ffmpeg available (FFMPEG_PATH, ffmpeg-static, or system ffmpeg)'),
+  );
+}
+
 /**
  * Convert one 2s WebM window to MP4 (H.264, no audio, 10fps, width px wide)
  * for SAM, which rejects WebM. Reads from stdin, writes a fragmented MP4
@@ -49,11 +83,10 @@ export function webmToMp4(
   width = 640,
 ): Promise<Buffer> {
   const bin = ffmpeg;
-  if (!bin) {
-    return Promise.reject(new Error('no ffmpeg available (FFMPEG_PATH, ffmpeg-static, or system ffmpeg)'));
-  }
-  return new Promise<Buffer>((resolve, reject) => {
-    const args = [
+  if (!bin) return noFfmpeg();
+  return runPiped(
+    bin,
+    [
       '-hide_banner',
       '-loglevel',
       'error',
@@ -71,30 +104,10 @@ export function webmToMp4(
       '-f',
       'mp4',
       'pipe:1',
-    ];
-    const child = spawn(bin, args, { signal: AbortSignal.timeout(TRANSCODE_TIMEOUT_MS) });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    child.stdout.on('data', (d: Buffer) => out.push(d));
-    child.stderr.on('data', (d: Buffer) => err.push(d));
-    child.on('error', (e) => reject(new Error(`ffmpeg failed to start: ${e.message}`)));
-    child.on('close', (code, signal) => {
-      if (code === 0) {
-        resolve(Buffer.concat(out));
-        return;
-      }
-      const detail = Buffer.concat(err).toString('utf8').trim().slice(0, 300);
-      reject(
-        new Error(
-          `ffmpeg transcode failed (code ${code ?? '?'}${signal ? `, ${signal}` : ''})${detail ? `: ${detail}` : ''}`,
-        ),
-      );
-    });
-    child.stdin.on('error', () => {
-      // stdin breaks when ffmpeg exits early on invalid input; close carries the error.
-    });
-    child.stdin.end(webm);
-  });
+    ],
+    webm,
+    'ffmpeg transcode',
+  );
 }
 
 /**
@@ -110,21 +123,11 @@ export function splitMjpegStream(stream: Buffer): Buffer[] {
   return starts.map((from, i) => stream.subarray(from, i + 1 < starts.length ? starts[i + 1] : stream.length));
 }
 
-/**
- * Extract the middle frame of one 2s WebM window as a 320px JPEG for SAM
- * image segmentation. Middle-by-count is timestamp-agnostic (MediaRecorder
- * timeslice chunks carry absolute stream timestamps, so `-ss 1.0` would
- * misfire on every chunk past the first) and lands at t≈1.0s for uniform
- * frame rates. Throws on missing ffmpeg, timeout, encode failure, or when
- * the window decodes to zero frames.
- */
-export function extractMiddleJpeg(webm: Buffer, ffmpeg = resolveFfmpeg()): Promise<Buffer> {
-  const bin = ffmpeg;
-  if (!bin) {
-    return Promise.reject(new Error('no ffmpeg available (FFMPEG_PATH, ffmpeg-static, or system ffmpeg)'));
-  }
-  return new Promise<Buffer>((resolve, reject) => {
-    const args = [
+/** Decode one 2s WebM window to its 320px JPEG frames (timestamp-agnostic). */
+async function decodeWindowFrames(webm: Buffer, bin: string): Promise<Buffer[]> {
+  const out = await runPiped(
+    bin,
+    [
       '-hide_banner',
       '-loglevel',
       'error',
@@ -139,33 +142,47 @@ export function extractMiddleJpeg(webm: Buffer, ffmpeg = resolveFfmpeg()): Promi
       '-c:v',
       'mjpeg',
       'pipe:1',
-    ];
-    const child = spawn(bin, args, { signal: AbortSignal.timeout(TRANSCODE_TIMEOUT_MS) });
-    const out: Buffer[] = [];
-    const err: Buffer[] = [];
-    child.stdout.on('data', (d: Buffer) => out.push(d));
-    child.stderr.on('data', (d: Buffer) => err.push(d));
-    child.on('error', (e) => reject(new Error(`ffmpeg failed to start: ${e.message}`)));
-    child.on('close', (code, signal) => {
-      if (code !== 0) {
-        const detail = Buffer.concat(err).toString('utf8').trim().slice(0, 300);
-        reject(
-          new Error(
-            `ffmpeg jpeg extract failed (code ${code ?? '?'}${signal ? `, ${signal}` : ''})${detail ? `: ${detail}` : ''}`,
-          ),
-        );
-        return;
-      }
-      const frames = splitMjpegStream(Buffer.concat(out));
-      if (frames.length === 0) {
-        reject(new Error('ffmpeg jpeg extract failed: window decoded to zero frames'));
-        return;
-      }
-      resolve(frames[Math.floor(frames.length / 2)]);
-    });
-    child.stdin.on('error', () => {
-      // stdin breaks when ffmpeg exits early on invalid input; close carries the error.
-    });
-    child.stdin.end(webm);
-  });
+    ],
+    webm,
+    'ffmpeg jpeg extract',
+  );
+  return splitMjpegStream(out);
+}
+
+/**
+ * Extract the middle frame of one 2s WebM window as a 320px JPEG for SAM
+ * image segmentation. Middle-by-count is timestamp-agnostic (MediaRecorder
+ * timeslice chunks carry absolute stream timestamps, so `-ss 1.0` would
+ * misfire on every chunk past the first) and lands at t≈1.0s for uniform
+ * frame rates. Throws on missing ffmpeg, timeout, encode failure, or when
+ * the window decodes to zero frames.
+ */
+export async function extractMiddleJpeg(webm: Buffer, ffmpeg = resolveFfmpeg()): Promise<Buffer> {
+  const bin = ffmpeg;
+  if (!bin) return noFfmpeg();
+  const frames = await decodeWindowFrames(webm, bin);
+  if (frames.length === 0) {
+    throw new Error('ffmpeg jpeg extract failed: window decoded to zero frames');
+  }
+  return frames[Math.floor(frames.length / 2)];
+}
+
+/**
+ * Sample one (middle, t≈1.0s) or two (quartiles, t≈0.5s/1.5s) 320px JPEGs
+ * from one 2s window. Two frames catch briefer gestures at twice the image
+ * cost; wall latency stays flat since all concept calls run in parallel.
+ */
+export async function extractSampleJpegs(
+  webm: Buffer,
+  count: 1 | 2,
+  ffmpeg = resolveFfmpeg(),
+): Promise<Buffer[]> {
+  const bin = ffmpeg;
+  if (!bin) return noFfmpeg();
+  const frames = await decodeWindowFrames(webm, bin);
+  if (frames.length === 0) {
+    throw new Error('ffmpeg jpeg extract failed: window decoded to zero frames');
+  }
+  if (count === 1) return [frames[Math.floor(frames.length / 2)]];
+  return [frames[Math.floor(frames.length / 4)], frames[Math.floor((frames.length * 3) / 4)]];
 }

@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic';
 
 export const metadata = {
   title: 'Preview delay',
-  description: 'How the 20-second broadcast delay works.',
+  description: 'How the 12-second broadcast delay works.',
 };
 
 export default function DelayPage() {
@@ -14,9 +14,9 @@ export default function DelayPage() {
       <Link href="/studio" className="text-sm text-neutral-400 hover:text-neutral-200">
         ← Studio
       </Link>
-      <h1 className="mt-2 font-serif text-3xl">The 20-second delay</h1>
+      <h1 className="mt-2 font-serif text-3xl">The 12-second delay</h1>
       <p className="mt-2 text-neutral-300">
-        Everything you perform reaches viewers exactly 20 seconds after our server receives it. That
+        Everything you perform reaches viewers exactly 12 seconds after our server receives it. That
         window is what the moderator uses: each 2-second chunk is transcribed, checked against the{' '}
         <Link href="/studio/rulebook" className="underline">
           rulebook

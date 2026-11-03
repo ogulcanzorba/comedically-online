@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Decision } from '../src/moderation/types';
-import { activeBlursAt, isBleepedAt, planForClip } from '../src/lib/censor-plan';
+import { activeBlursAt, isBleepedAt, planForBroadcast } from '../src/lib/censor-plan';
 
 const BLEEP: Decision = { action: 'bleep', reason: 'r', startMs: 500, endMs: 900 };
 const BLUR: Decision = {
@@ -13,43 +13,50 @@ const BLUR: Decision = {
 };
 const WARN: Decision = { action: 'warn', reason: 'r' };
 
-describe('planForClip', () => {
-  it('maps chunk-relative decisions onto clip seconds', () => {
-    // Flagged chunk 5 ([10s,12s]) inside a [8s,14s] clip: offset 2s.
-    const plan = planForClip([BLEEP, BLUR, WARN], 8, 5, 14);
-    assert.deepEqual(plan.bleeps, [{ startS: 2.5, endS: 2.9 }]);
-    assert.deepEqual(plan.blurs, [{ startS: 2, endS: 4, box: BLUR.box }]);
-    assert.equal(plan.durationS, 6);
+describe('planForBroadcast', () => {
+  it('maps each flagged chunk onto scene seconds', () => {
+    // Chunk 5 covers scene [10s,12s].
+    const plan = planForBroadcast([{ seq: 5, decisions: [BLEEP, BLUR, WARN] }], 60);
+    assert.deepEqual(plan.bleeps, [{ startS: 10.5, endS: 10.9 }]);
+    assert.deepEqual(plan.blurs, [{ startS: 10, endS: 12, box: BLUR.box }]);
+    assert.equal(plan.durationS, 60);
   });
 
-  it('defaults missing windows to the flagged chunk and missing boxes to full frame', () => {
-    const plan = planForClip(
+  it('merges decisions across chunks and defaults missing windows', () => {
+    const plan = planForBroadcast(
       [
-        { action: 'bleep', reason: 'r' },
-        { action: 'blur', reason: 'r' },
+        { seq: 0, decisions: [{ action: 'bleep', reason: 'r' }] },
+        { seq: 3, decisions: [{ action: 'blur', reason: 'r' }] },
       ],
-      0,
-      0,
-      4,
+      10,
     );
     assert.deepEqual(plan.bleeps, [{ startS: 0, endS: 2 }]);
-    assert.deepEqual(plan.blurs[0].box, { x: 0, y: 0, w: 1, h: 1 });
+    assert.deepEqual(plan.blurs, [{ startS: 6, endS: 8, box: { x: 0, y: 0, w: 1, h: 1 } }]);
+  });
+
+  it('ignores warn/allow decisions', () => {
+    const plan = planForBroadcast(
+      [{ seq: 1, decisions: [WARN, { action: 'allow', reason: 'r' }] }],
+      10,
+    );
+    assert.deepEqual(plan.bleeps, []);
+    assert.deepEqual(plan.blurs, []);
   });
 });
 
 describe('censor windows', () => {
-  const plan = planForClip([BLEEP, BLUR], 8, 5, 14);
+  const plan = planForBroadcast([{ seq: 5, decisions: [BLEEP, BLUR] }], 60);
 
   it('detects bleeped moments with half-open edges', () => {
-    assert.equal(isBleepedAt(plan, 2.49), false);
-    assert.equal(isBleepedAt(plan, 2.5), true);
-    assert.equal(isBleepedAt(plan, 2.89), true);
-    assert.equal(isBleepedAt(plan, 2.9), false);
+    assert.equal(isBleepedAt(plan, 10.49), false);
+    assert.equal(isBleepedAt(plan, 10.5), true);
+    assert.equal(isBleepedAt(plan, 10.89), true);
+    assert.equal(isBleepedAt(plan, 10.9), false);
   });
 
   it('returns active blur boxes per moment', () => {
-    assert.deepEqual(activeBlursAt(plan, 1.99), []);
-    assert.deepEqual(activeBlursAt(plan, 3), [BLUR.box]);
-    assert.deepEqual(activeBlursAt(plan, 4), []);
+    assert.deepEqual(activeBlursAt(plan, 9.99), []);
+    assert.deepEqual(activeBlursAt(plan, 11), [BLUR.box]);
+    assert.deepEqual(activeBlursAt(plan, 12), []);
   });
 });

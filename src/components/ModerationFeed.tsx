@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import type { ChunkDebug, Decision } from '@/moderation/types';
 import rulebookData from '@/moderation/rulebook.json';
 import { localRecording, useLocalRecording } from '@/lib/local-recording';
-import { activeBlursAt, isBleepedAt, planForClip, type CensorPlan } from '@/lib/censor-plan';
-import { renderCensoredClip } from '@/lib/censor-render';
+import { planForBroadcast } from '@/lib/censor-plan';
+import { CensoredBroadcastPlayer, type BroadcastMarker } from './CensoredBroadcastPlayer';
 
 export interface FeedEvent {
   seq: number;
@@ -54,7 +54,7 @@ function useModerationFeed(showSlug: string): { events: FeedEvent[]; clear: () =
   const [events, setEvents] = useState<FeedEvent[]>(() => load(showSlug));
   const genRef = useRef(localRecording.generation);
   const storeVersion = useLocalRecording();
-  // New broadcast started: wipe the previous broadcast's log, debug rows, and clips.
+  // New broadcast started: wipe the previous broadcast's log and debug rows.
   useEffect(() => {
     if (localRecording.generation !== genRef.current) {
       genRef.current = localRecording.generation;
@@ -109,10 +109,11 @@ function ruleLabel(ruleId: string | undefined): string {
   return TITLES.get(ruleId) ?? ruleId;
 }
 
-/** Collapsible per-chunk debug: transcript, language, rule, stage timings, raw errors. */
+/** Collapsible per-chunk debug: transcript, language, rule, stage timings, SAM breakdown, errors. */
 function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
   if (!debug) return <span className="text-neutral-600">—</span>;
   const errors = Object.entries(debug.errors);
+  const sam = debug.samBreakdown;
   return (
     <details className="text-xs">
       <summary className="cursor-pointer text-neutral-400 hover:text-neutral-200">Debug</summary>
@@ -137,6 +138,21 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
             {debug.judgeSkipped ? 'skipped (no rule candidate)' : `${debug.timingsMs.judgeMs}ms`}
           </dd>
         </div>
+        {sam && (
+          <div>
+            <dt className="inline text-neutral-500">sam: </dt>
+            <dd className="inline">
+              extract {sam.extractMs}ms
+              {sam.concepts.map((c) => (
+                <span key={c.ruleId}>
+                  {' '}· {c.ruleId}: {c.boxes} boxes
+                  {c.confidence !== null ? ` (conf ${c.confidence.toFixed(2)})` : ''} {c.ms}ms
+                  {c.confirmed ? ' +confirm' : ''}
+                </span>
+              ))}
+            </dd>
+          </div>
+        )}
         {errors.length > 0 && (
           <div>
             <dt className="inline text-neutral-500">errors: </dt>
@@ -150,149 +166,24 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
   );
 }
 
-/** Clip player with viewer-identical censorship: blur overlays + bleep mute. */
-function CensoredClipPlayer({ url, plan }: { url: string; plan: CensorPlan }) {
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const [now, setNow] = useState(0);
-  const muted = isBleepedAt(plan, now);
-  useEffect(() => {
-    if (videoRef.current) videoRef.current.muted = muted;
-  }, [muted]);
-  const blurs = activeBlursAt(plan, now);
-  const sync = (el: HTMLVideoElement): void => setNow(el.currentTime);
-  return (
-    <div className="relative w-64 max-w-full">
-      <video
-        ref={videoRef}
-        src={url}
-        controls
-        preload="metadata"
-        className="block w-full rounded-md bg-black"
-        onTimeUpdate={(e) => sync(e.currentTarget)}
-        onSeeked={(e) => sync(e.currentTarget)}
-      />
-      {blurs.map((b, i) => (
-        <div
-          key={i}
-          aria-hidden="true"
-          className="pointer-events-none absolute rounded-sm bg-black/45 backdrop-blur-md"
-          style={{
-            left: `${b.x * 100}%`,
-            top: `${b.y * 100}%`,
-            width: `${b.w * 100}%`,
-            height: `${b.h * 100}%`,
-          }}
-        />
-      ))}
-      {muted && (
-        <span className="absolute right-2 top-2 rounded bg-neutral-950/80 px-2 py-0.5 text-[11px] font-semibold text-red-300">
-          MUTED
-        </span>
-      )}
-    </div>
-  );
-}
-
-/** Per-event violation clip from the device-local recording, with play + download. */
-function ClipCell({
-  event,
-  playing,
-  onToggle,
-}: {
-  event: FeedEvent;
-  playing: boolean;
-  onToggle: () => void;
-}) {
-  const clip = localRecording.clipFor(event.seq);
-  const [mode, setMode] = useState<'censored' | 'original'>('censored');
-  const [progress, setProgress] = useState<number | null>(null);
-  const [renderError, setRenderError] = useState('');
-  if (!clip) return <span className="text-neutral-600">—</span>;
-  const plan = planForClip(event.decisions, clip.startS, event.seq, clip.endS);
-  const downloadCensored = async (): Promise<void> => {
-    setRenderError('');
-    setProgress(0);
-    try {
-      const blob = await renderCensoredClip(clip.url, plan, setProgress);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `comedically-clip-seq${event.seq}-censored.webm`;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } catch (e) {
-      setRenderError(e instanceof Error ? e.message : 'render failed');
-    } finally {
-      setProgress(null);
-    }
-  };
-  return (
-    <div>
-      <div className="flex gap-1 text-xs" role="group" aria-label="Clip version">
-        {(['censored', 'original'] as const).map((m) => (
-          <button
-            key={m}
-            onClick={() => setMode(m)}
-            aria-pressed={mode === m}
-            className={`rounded px-2 py-0.5 ${
-              mode === m ? 'bg-neutral-200 text-neutral-950' : 'text-neutral-400 underline'
-            }`}
-          >
-            {m === 'censored' ? 'Show censored' : 'Show original'}
-          </button>
-        ))}
-      </div>
-      <div className="mt-1 flex gap-2 text-xs">
-        <button onClick={onToggle} className="text-neutral-300 underline hover:text-white">
-          {playing ? 'Close' : 'Play'}
-        </button>
-        {mode === 'original' ? (
-          <a
-            href={clip.url}
-            download={`comedically-clip-seq${event.seq}.webm`}
-            className="text-neutral-300 underline hover:text-white"
-          >
-            Download
-          </a>
-        ) : progress !== null ? (
-          <span className="text-neutral-400">Rendering {Math.round(progress * 100)}%…</span>
-        ) : (
-          <button onClick={() => void downloadCensored()} className="text-neutral-300 underline hover:text-white">
-            Download
-          </button>
-        )}
-      </div>
-      {renderError && (
-        <p className="mt-1 text-xs text-red-300">
-          Censored render failed ({renderError}) —{' '}
-          <a href={clip.url} download={`comedically-clip-seq${event.seq}.webm`} className="underline">
-            download original
-          </a>
-        </p>
-      )}
-      {playing && (
-        <div className="mt-2">
-          {mode === 'original' ? (
-            <video src={clip.url} controls preload="metadata" className="block w-64 max-w-full rounded-md bg-black" />
-          ) : (
-            <CensoredClipPlayer url={clip.url} plan={plan} />
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 /** Live log table + post-broadcast recap, fed by one passive relay connection. */
 export function ModerationPanels({ showSlug }: { showSlug: string }) {
   const { events, clear } = useModerationFeed(showSlug);
-  useLocalRecording(); // refresh clip cells as recording blobs land
-  const [playing, setPlaying] = useState<number | null>(null);
-  const showClips = localRecording.hasRecording;
+  useLocalRecording(); // refresh as recording blobs land
   const live = [...events].reverse().slice(0, 20);
   const censored = events.filter((e) => e.decisions.some((d) => d.action === 'bleep' || d.action === 'blur'));
-  const toggle = (seq: number): void => setPlaying((prev) => (prev === seq ? null : seq));
+  const ended = localRecording.status === 'ended';
+  const full = ended ? localRecording.full() : null;
+  const plan = full ? planForBroadcast(events, full.seconds) : null;
+  const markers: BroadcastMarker[] = censored.flatMap((e) =>
+    e.decisions
+      .filter((d) => d.action === 'bleep' || d.action === 'blur')
+      .map((d) => ({
+        seq: e.seq,
+        action: d.action as 'bleep' | 'blur',
+        label: `${ruleLabel(d.ruleId)}: ${d.explanation ?? d.reason}`,
+      })),
+  );
 
   return (
     <>
@@ -301,10 +192,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
           <h2 className="font-serif text-2xl">Moderation log</h2>
           {events.length > 0 && (
             <button
-              onClick={() => {
-                clear();
-                setPlaying(null);
-              }}
+              onClick={() => clear()}
               className="text-xs text-neutral-400 underline hover:text-white"
             >
               Clear log
@@ -312,7 +200,7 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
           )}
         </div>
         <p className="mt-1 text-sm text-neutral-500">
-          Flagged chunks as they air (20s behind you). Empty until the broadcast hits a rule.
+          Flagged chunks as they air (12s behind you). Empty until the broadcast hits a rule.
         </p>
         {live.length === 0 ? (
           <p className="mt-3 rounded-md border border-neutral-800 bg-neutral-900/60 p-4 text-sm text-neutral-400">
@@ -329,7 +217,6 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                   <th className="px-3 py-2 font-medium">Action</th>
                   <th className="px-3 py-2 font-medium">Why</th>
                   <th className="px-3 py-2 font-medium">Debug</th>
-                  {showClips && <th className="px-3 py-2 font-medium">Clip</th>}
                 </tr>
               </thead>
               <tbody>
@@ -348,11 +235,6 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                           <DebugCell debug={e.debug} />
                         </td>
                       )}
-                      {showClips && i === 0 && (
-                        <td rowSpan={e.decisions.length} className="px-3 py-2 align-top">
-                          <ClipCell event={e} playing={playing === e.seq} onToggle={() => toggle(e.seq)} />
-                        </td>
-                      )}
                     </tr>
                   )),
                 )}
@@ -364,12 +246,27 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
 
       <section id="recap" aria-label="Broadcast recap" className="mt-8 scroll-mt-20">
         <h2 className="font-serif text-2xl">Recap: censored moments</h2>
-        {censored.length === 0 ? (
-          <p className="mt-2 text-sm text-neutral-400">
-            After the broadcast, every bleep and blur lands here with its scene timestamp and reason.
-          </p>
+        {full && plan ? (
+          <div className="mt-3">
+            <p className="mb-2 text-sm text-neutral-400">
+              The full broadcast as viewers saw it — blur boxes and bleeps applied. Click a marker
+              to jump to that moment.
+            </p>
+            <CensoredBroadcastPlayer
+              url={full.url}
+              plan={plan}
+              markers={markers}
+              fileName={`comedically-broadcast-censored.webm`}
+            />
+          </div>
         ) : (
-          <ul className="mt-3 space-y-2">
+          <p className="mt-2 text-sm text-neutral-400">
+            After the broadcast ends, the full censored recording lands here with its scene
+            timestamps and reasons.
+          </p>
+        )}
+        {censored.length > 0 && (
+          <ul className="mt-4 space-y-2">
             {censored.map((e) => (
               <li key={e.seq} className="rounded-md border border-neutral-800 bg-neutral-900/60 p-3 text-sm">
                 {e.decisions
@@ -383,11 +280,6 @@ export function ModerationPanels({ showSlug }: { showSlug: string }) {
                       </span>
                     </p>
                   ))}
-                {showClips && (
-                  <div className="mt-2">
-                    <ClipCell event={e} playing={playing === e.seq} onToggle={() => toggle(e.seq)} />
-                  </div>
-                )}
               </li>
             ))}
           </ul>
