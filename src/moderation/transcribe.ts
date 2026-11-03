@@ -27,6 +27,88 @@ function requireKey(): string {
   return key;
 }
 
+export interface WavPcm {
+  pcm: Buffer;
+  sampleRate: number;
+  channels: number;
+  bitsPerSample: number;
+  byteRate: number;
+}
+
+/** Parse a WAV header; returns the PCM payload + format (null when unparseable). */
+export function extractWavPcm(wav: Buffer): WavPcm | null {
+  if (wav.length < 44) return null;
+  if (wav.toString('ascii', 0, 4) !== 'RIFF' || wav.toString('ascii', 8, 12) !== 'WAVE') return null;
+  let sampleRate = 0;
+  let channels = 0;
+  let bits = 0;
+  let byteRate = 0;
+  let dataOff = -1;
+  let dataLen = 0;
+  let off = 12;
+  while (off + 8 <= wav.length) {
+    const id = wav.toString('ascii', off, off + 4);
+    const len = wav.readUInt32LE(off + 4);
+    if (id === 'fmt ' && len >= 16 && off + 8 + 16 <= wav.length) {
+      channels = wav.readUInt16LE(off + 10);
+      sampleRate = wav.readUInt32LE(off + 12);
+      byteRate = wav.readUInt32LE(off + 16);
+      bits = wav.readUInt16LE(off + 22);
+    }
+    if (id === 'data') {
+      dataOff = off + 8;
+      dataLen = len;
+      break;
+    }
+    off += 8 + len + (len % 2);
+  }
+  if (dataOff < 0 || sampleRate <= 0 || channels <= 0 || bits <= 0 || byteRate <= 0) return null;
+  dataLen = Math.min(dataLen, wav.length - dataOff);
+  return { pcm: wav.subarray(dataOff, dataOff + dataLen), sampleRate, channels, bitsPerSample: bits, byteRate };
+}
+
+/**
+ * Concatenate same-format PCM WAVs under one fresh 44-byte header (for 4s
+ * overlapping fallback windows). Returns null on format mismatch.
+ */
+export function concatWavs(wavs: Buffer[]): Buffer | null {
+  if (wavs.length === 0) return null;
+  const parts: WavPcm[] = [];
+  for (const w of wavs) {
+    const p = extractWavPcm(w);
+    if (!p) return null;
+    parts.push(p);
+  }
+  const first = parts[0];
+  if (!parts.every((p) => p.sampleRate === first.sampleRate && p.channels === first.channels && p.bitsPerSample === first.bitsPerSample)) {
+    return null;
+  }
+  const pcm = Buffer.concat(parts.map((p) => p.pcm));
+  const out = Buffer.alloc(44 + pcm.length);
+  out.write('RIFF', 0);
+  out.writeUInt32LE(36 + pcm.length, 4);
+  out.write('WAVE', 8);
+  out.write('fmt ', 12);
+  out.writeUInt32LE(16, 16);
+  out.writeUInt16LE(1, 20); // PCM
+  out.writeUInt16LE(first.channels, 22);
+  out.writeUInt32LE(first.sampleRate, 24);
+  out.writeUInt32LE(first.byteRate, 28);
+  out.writeUInt16LE((first.channels * first.bitsPerSample) / 8, 32);
+  out.writeUInt16LE(first.bitsPerSample, 34);
+  out.write('data', 36);
+  out.writeUInt32LE(pcm.length, 40);
+  pcm.copy(out, 44);
+  return out;
+}
+
+/** PCM duration in ms (null when unparseable). */
+export function wavPcmMs(wav: Buffer): number | null {
+  const p = extractWavPcm(wav);
+  if (!p) return null;
+  return (p.pcm.length / p.byteRate) * 1000;
+}
+
 /**
  * Split a PCM WAV into two equal halves (header + PCM each), for timing
  * refinement. Voice returns turn-level times only, so re-transcribing halves

@@ -33,11 +33,15 @@ npm run dev            # http://localhost:3000
 | `MAX_HOLD_MS` | `4000` | Past delay + hold, unmoderated chunks release censored. |
 | `VOICE_TIMEOUT_MS` / `SAM_TIMEOUT_MS` / `SPARK_TIMEOUT_MS` | `8000` / `20000` / `8000` | Per-model call timeouts. |
 | `SAM_IMAGE_TIMEOUT_MS` | `6000` | SAM image calls: no retries, fail closed fast. |
-| `VISUAL_STRATEGY` | `gate` | Live visual path: `gate` (Spark VLM verdicts) or `sam` (legacy segmentation). |
+| `VISION_BACKEND` | `spark` | Live visual path: `spark` (one multi-frame call) / `sam` / `gate`. Legacy `VISUAL_STRATEGY` alias honored when unset. |
+| `SPARK_VISION_MODEL` / `SPARK_VISION_EFFORT` | `muse-spark-1.3` / `minimal` | Classifier model + effort (unsure band retries at `low`). |
+| `VISION_HIT` / `VISION_UNSURE` | `0.5` / `0.3` | Blur at ≥HIT; [UNSURE, HIT) gets a 2nd opinion call. Hysteresis blurs 2 chunks past each hit. |
+| `SPARK_PRICING_MODE` | `standard` | `contributor` bills Spark at $0.10/$0.20 per 1M tokens. |
 | `GATE_FRAMES` / `GATE_TIMEOUT_MS` | `2` / `8000` | VLM calls per chunk over middle frames; per-call timeout. |
 | `MOD_POOL` | `8` | Chunks moderating at once. |
 | `VISUAL_FAIL_MODE` | `closed` | `open` releases failed visuals unblurred with a warning (demo testing). |
 | `FRAMES_PER_CHUNK` / `NEXT_PUBLIC_FRAMES_PER_CHUNK` | `4` / `4` | Frames sampled per chunk (must match); linear image cost, flat wall time. |
+| `FRAME_WIDTH` / `NEXT_PUBLIC_FRAME_WIDTH` | `640` / `640` | Sampled-frame width in px (must match; restart dev to apply). |
 | `BLUR_PAD_CHUNKS` | `1` | Neighbor chunks blurred around a flagged chunk (`0` disables). |
 | `DEBUG_FRAMES` | off | `1` saves sampled JPEGs to `debug-frames/` (gitignored) with per-concept `[sam]` logs. |
 | `DEBUG_CAPTURE` / `CHUNKS_DIR` | off / `/tmp/chunks` | `1` saves moderation inputs for `npm run soak:live` replay. |
@@ -87,23 +91,28 @@ npm run dev            # http://localhost:3000
 2s WebM chunks + parallel 16kHz WAV over one WebSocket; server ring buffer releases
 chunk + decisions exactly 12s after server receipt. Ending is graceful: the server
 drains the buffer to viewers before end-of-stream, with drain progress to the
-studio. Mock mode scripts bleeps/blurs;
-live mode uses Voice Transcribe + a Spark VLM gate (one structured-verdict call
-per gated frame, minimal reasoning, covering all video rules with rule ids) +
-the Spark judge (minimal reasoning, only on rule candidates) behind the spend
-cap. Audio positives re-transcribe 1s halves in parallel with the judge to pin
-the bleep window to ~1s (word-split fallback: full-chunk turns). Measured live:
-clean chunks ~2-4s wall at ~$2.5/stream-hour; positives ~4-6s. The legacy SAM
-segmentation path stays available via VISUAL_STRATEGY=sam.
+studio. Mock mode scripts bleeps/blurs; live mode behind the spend cap:
+- **Video**: one Spark Responses call per chunk over the previous chunk's last
+  2 frames + this chunk's 4 (rulebook-generated prompt, JSON verdicts with
+  per-rule confidence; unsure band gets a `low` 2nd opinion; hysteresis blurs
+  2 chunks past each hit). `sam`/`gate` backends stay via `VISION_BACKEND`.
+- **Audio**: realtime ASR over WebSocket (Turkish-aware fuzzy match on every
+  partial/final, `[t-1500ms, t+300ms]` bleeps; fuzzy-only goes to the judge
+  with fail-closed timing) plus 4s overlapping file-transcription fallback
+  (whole-chunk bleeps, skipped where realtime covers). Studio shows a banner
+  while realtime is down.
+Measured (eval script, synthetic clean clips): spark-minimal-640 ~2.4s wall at
+~$5/stream-hour; spark-minimal-320 ~$2.8/h; sam ~$36/h.
 
 ## Checks
 
 ```bash
 npm run typecheck   # strict TS, must be clean
-npm test            # 8 suites (auth, delay, moderation, overlay, datetime, timezone, pricing, tags)
+npm test            # full suite incl. vision/fuzzy/realtime protocol tests
 npm run prove:relay # end-to-end relay proof with the real 12s delay (~17s)
 npm run build       # production build incl. middleware + sitemap
 npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
+npm run eval:gestures -- <clips-dir>  # backend accuracy/latency/cost table ($1 cap)
 ```
 
 ## Known limits
@@ -111,9 +120,10 @@ npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
 - Single concurrent relay stream shared by all “live” show pages; tickets gate access, not
   the transport. Multi-show isolation is future work.
 - SQLite file is local (no replication); in-memory rate limits reset on restart.
-- Bleep timing is turn-level refined to ~1s halves (Voice returns turns, not
-  words; words split across the half boundary fall back to wider windows).
-- Live visual + audio paths are verified with a key (gate verdicts on real
-  studio frames, waffle bleep on real speech, Turkish transcription). Mock
+- Spark vision calls must fit in MAX_HOLD_MS (default 4s); `low` effort at
+  640px can exceed it and fail closed — raise the hold or stay on `minimal`.
+- Recall numbers need real labelled gesture clips; only clean-path eval ran here.
+- Live visual + audio paths are verified with a key (spark verdicts, realtime
+  transcripts, waffle bleep on real speech, Turkish transcription). Mock
   stays the default.
 - No real payments, email, or recording storage — all intentionally mocked or omitted.

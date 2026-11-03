@@ -6,10 +6,11 @@ import type {
   ModerationLogEntry,
   ModerationMode,
   SamBreakdown,
+  VisionBreakdown,
   VisualFlag,
 } from './types';
 import type { TranscriptTurn } from './types';
-import { transcribeChunk, transcribeHalves } from './transcribe';
+import { transcribeChunk, transcribeHalves, wavHalfBoundaryMs } from './transcribe';
 import { detectVisual } from './detect-visual';
 import { judgeContext } from './judge';
 import { audioRuleForTarget, audioRulesMatching, ruleById } from './rulebook';
@@ -25,6 +26,14 @@ export interface ModerateArgs {
   wav: Buffer | null;
   /** Studio canvas captures; skips server ffmpeg when any arrive. */
   frameJpgs?: Buffer[];
+  /** Previous chunk's canvas captures (Spark overlap input). */
+  prevFrameJpgs?: Buffer[];
+  /**
+   * Duration (ms) of the previous chunk's audio prepended to `wav`, forming
+   * the 4s overlapping fallback window (0 when the window holds only this
+   * chunk). Live mode only; mock ignores it.
+   */
+  wavPrevMs?: number;
   recentTranscript: string;
   tracker: SpendTracker;
   /** Server receipt time (Date.now()) for queue-wait measurement. Omit when unknown. */
@@ -63,6 +72,9 @@ export function errorDetail(e: unknown): string {
 }
 
 const SEVERITY: ModerationAction[] = ['bleep', 'blur', 'warn', 'allow'];
+
+/** Label on whole-chunk fallback bleeps (skipped when realtime covers the chunk). */
+export const FALLBACK_LABEL = 'fallback';
 
 /**
  * Map an offending word/phrase onto chunk-relative bleep windows.
@@ -130,10 +142,17 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
     error: string | null;
     detail?: SamBreakdown;
     gateDetail?: GateBreakdown;
+    visionDetail?: VisionBreakdown;
   }> {
     const start = Date.now();
     try {
-      const v = await detectVisual(args.video, args.seq, mode, args.frameJpgs ?? []);
+      const v = await detectVisual(
+        args.video,
+        args.seq,
+        mode,
+        args.frameJpgs ?? [],
+        args.prevFrameJpgs ?? [],
+      );
       return {
         flags: v.flags,
         costUsd: v.costUsd,
@@ -141,6 +160,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
         error: null,
         ...(v.detail ? { detail: v.detail } : {}),
         ...(v.gateDetail ? { gateDetail: v.gateDetail } : {}),
+        ...(v.visionDetail ? { visionDetail: v.visionDetail } : {}),
       };
     } catch (e) {
       return { flags: [], costUsd: 0, ms: Date.now() - start, error: errorDetail(e) };
@@ -202,6 +222,8 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   let judgeError: string | null = null;
   let judgeSkipped = false;
   let halvesMs: number | undefined;
+  let fallbackHitPrev = false;
+  let fallbackRuleId: string | undefined;
   if (transcriptText.trim().length > 0) {
     // The judge only acts on rulebook matches, so a transcript with no rule
     // candidate needs no call at all (saves ~2s and the Spark tokens).
@@ -233,23 +255,54 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
         judgeReason = j.verdict.reason;
         if (j.verdict.action === 'bleep') {
           const target = j.verdict.target ?? '';
-          // Pin the bleep to the ~1s half holding the word; a word split
-          // across the boundary matches neither half, so fall back to the
-          // full-chunk turns (wider but still covering the word).
-          const timingTurns =
-            target.trim().length > 0 &&
-            halves.turns.some((t) => t.transcript.toLowerCase().includes(target.toLowerCase()))
-              ? halves.turns
-              : turns;
           const rule = audioRuleForTarget(target);
-          for (const w of bleepWindowsForTarget(timingTurns, target)) {
-            decisions.push({
-              action: 'bleep',
-              reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
-              startMs: w.startMs,
-              endMs: w.endMs,
-              ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
-            });
+          if (mode === 'live') {
+            // 4s overlapping fallback window (prev + current chunk): the
+            // halves are the two 2s parts, so they decide WHICH overlapping
+            // chunk(s) bleep in full. Boundary-split or unknown placement
+            // bleeps both (fail-closed); the relay skips chunks a realtime
+            // bleep already covers.
+            const needle = target.toLowerCase();
+            const boundary = args.wav ? wavHalfBoundaryMs(args.wav) : 2000;
+            const halfText = (first: boolean): string =>
+              halves.turns
+                .filter((t) => (t.startMs < boundary) === first)
+                .map((t) => t.transcript.toLowerCase())
+                .join(' ');
+            const hitFirst = needle.trim().length > 0 && halfText(true).includes(needle);
+            const hitSecond = needle.trim().length > 0 && halfText(false).includes(needle);
+            const unknown = !hitFirst && !hitSecond;
+            const hasPrev = (args.wavPrevMs ?? 0) > 0;
+            if (hitSecond || unknown || (!hasPrev && hitFirst)) {
+              decisions.push({
+                action: 'bleep',
+                reason: rule ? `rule ${rule.id}: ${judgeReason} (fallback window)` : `${judgeReason} (fallback window)`,
+                startMs: 0,
+                endMs: 2000,
+                label: FALLBACK_LABEL,
+                ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
+              });
+            }
+            if (hasPrev && (hitFirst || unknown)) {
+              fallbackHitPrev = true;
+              fallbackRuleId = rule?.id;
+            }
+          } else {
+            // Mock keeps the scripted precise windows (covered by mock tests).
+            const timingTurns =
+              target.trim().length > 0 &&
+              halves.turns.some((t) => t.transcript.toLowerCase().includes(target.toLowerCase()))
+                ? halves.turns
+                : turns;
+            for (const w of bleepWindowsForTarget(timingTurns, target)) {
+              decisions.push({
+                action: 'bleep',
+                reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
+                startMs: w.startMs,
+                endMs: w.endMs,
+                ...(rule ? { ruleId: rule.id, explanation: rule.explanation } : {}),
+              });
+            }
           }
         } else if (j.verdict.action === 'warn') {
           decisions.push({ action: 'warn', reason: judgeReason });
@@ -323,6 +376,9 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       errors,
       ...(det.detail ? { samBreakdown: det.detail } : {}),
       ...(det.gateDetail ? { gateBreakdown: det.gateDetail } : {}),
+      ...(det.visionDetail ? { visionBreakdown: det.visionDetail } : {}),
+      ...(fallbackHitPrev ? { fallbackHitPrev: true as const } : {}),
+      ...(fallbackRuleId ? { fallbackRuleId } : {}),
       ...(args.receivedAtMs ? { receivedAtMs: args.receivedAtMs } : {}),
     },
   };

@@ -5,8 +5,21 @@ import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { Semaphore } from '../lib/semaphore';
-import { moderateChunk, moderationMode } from '../moderation/index';
-import { ruleById } from '../moderation/rulebook';
+import { FALLBACK_LABEL, moderateChunk, moderationMode } from '../moderation/index';
+import { audioBleepRules, ruleById } from '../moderation/rulebook';
+import { hysteresisNext, initialHysteresis } from '../moderation/spark-vision';
+import type { HysteresisState } from '../moderation/spark-vision';
+import { judgeContext } from '../moderation/judge';
+import { matchBanned, OccurrenceTracker, tokenizeTr } from '../moderation/fuzzy';
+import type { BannedSpelling, FuzzyHit } from '../moderation/fuzzy';
+import {
+  mapRangeToChunks,
+  PCM16_BYTES_PER_MS,
+  REALTIME_BLEEP_POST_MS,
+  REALTIME_BLEEP_PRE_MS,
+  RealtimeSession,
+} from '../moderation/realtime';
+import { concatWavs, extractWavPcm, wavPcmMs } from '../moderation/transcribe';
 import { ffmpegActiveChildren, preassembleChunk } from '../moderation/transcode';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
 import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
@@ -20,6 +33,7 @@ import type {
   MediaMetaMessage,
   RulesMessage,
   StreamEndedMessage,
+  StudioWarningMessage,
 } from '../lib/ws-protocol';
 
 export interface StreamHostOptions {
@@ -63,6 +77,19 @@ export function blurPadChunks(): number {
 /** Label marking safety-margin decisions (also the dedupe key with ruleId). */
 const PAD_LABEL = 'safety margin';
 
+/** Label marking hysteresis blurs (never cast their own safety margin). */
+const HYSTERESIS_LABEL = 'hysteresis';
+
+/** Labels on realtime scheduled bleeps (exact vs fuzzy-judged). */
+const REALTIME_LABEL = 'realtime';
+const REALTIME_FUZZY_LABEL = 'realtime-fuzzy';
+
+/** Studio warning code while realtime ASR is down (fallback covers audio). */
+const REALTIME_DOWN_CODE = 'realtime-down';
+
+/** PCM bytes per 2s chunk at 16kHz 16-bit mono (alignment unit). */
+const CHUNK_PCM_BYTES = 2000 * PCM16_BYTES_PER_MS;
+
 const FULL_FRAME = { x: 0, y: 0, w: 1, h: 1 } as const;
 
 function padBlurDecision(ruleId: string, fromSeq: number): Decision {
@@ -79,6 +106,68 @@ function padBlurDecision(ruleId: string, fromSeq: number): Decision {
     ruleId,
     ...(rule ? { explanation: rule.explanation } : {}),
   };
+}
+
+function hysteresisBlurDecision(ruleId: string, fromSeq: number): Decision {
+  const rule = ruleById(ruleId);
+  return {
+    action: 'blur',
+    reason: rule
+      ? `rule ${rule.id}: gesture seen recently (chunk #${fromSeq}); blurring until 2 consecutive clean chunks`
+      : 'hysteresis blur',
+    startMs: 0,
+    endMs: 2000,
+    box: { ...FULL_FRAME },
+    label: HYSTERESIS_LABEL,
+    ruleId,
+    ...(rule ? { explanation: rule.explanation } : {}),
+  };
+}
+
+function realtimeBleepDecision(
+  ruleId: string,
+  token: string,
+  startMs: number,
+  endMs: number,
+  fuzzy: boolean,
+): Decision {
+  const rule = ruleById(ruleId);
+  return {
+    action: 'bleep',
+    reason: rule
+      ? `rule ${rule.id}: realtime ${fuzzy ? 'fuzzy ' : ''}match "${token}"`
+      : `realtime ${fuzzy ? 'fuzzy ' : ''}match`,
+    startMs,
+    endMs,
+    label: fuzzy ? REALTIME_FUZZY_LABEL : REALTIME_LABEL,
+    ruleId,
+    ...(rule ? { explanation: rule.explanation } : {}),
+  };
+}
+
+function fallbackBleepDecision(ruleId: string): Decision {
+  const rule = ruleById(ruleId);
+  return {
+    action: 'bleep',
+    reason: rule
+      ? `rule ${rule.id}: fallback window hit (fallback window)`
+      : 'fallback window hit (fallback window)',
+    startMs: 0,
+    endMs: 2000,
+    label: FALLBACK_LABEL,
+    ruleId,
+    ...(rule ? { explanation: rule.explanation } : {}),
+  };
+}
+
+/** Banned spellings (match + aliases) for realtime keywords and fuzzy matching. */
+function bannedSpellings(): BannedSpelling[] {
+  const out: BannedSpelling[] = [];
+  for (const r of audioBleepRules()) {
+    out.push({ ruleId: r.id, spelling: r.match });
+    for (const a of r.aliases ?? []) out.push({ ruleId: r.id, spelling: a });
+  }
+  return out;
 }
 
 /**
@@ -127,6 +216,24 @@ export class StreamHost {
   /** Studio seqs whose moderation already started (labels late/orphaned wavs). */
   private readonly startedStudio = new Set<number>();
   private readonly log: ModerationLogEntry[] = [];
+  /** Previous chunk's canvas frames (Spark vision overlap input). */
+  private lastJpgs: Buffer[] = [];
+  /** Spark vision hysteresis (armed by hits, reset per broadcast). */
+  private hysteresis: HysteresisState = initialHysteresis();
+  private lastVisionHitSeq = -1;
+  /** Previous chunk's wav (4s overlapping fallback window). */
+  private lastWav: Buffer | null = null;
+  private lastWavStudioSeq = -1;
+  /** Realtime ASR session (live mode only; null in mock). */
+  private realtime: RealtimeSession | null = null;
+  private realtimeUp = false;
+  private realtimeWarned = false;
+  private rtTracker = new OccurrenceTracker();
+  /** Seqs carrying a realtime bleep (fallback skips covered chunks). */
+  private readonly realtimeBleepedSeqs = new Set<number>();
+  /** Realtime bleeps owed to chunks not yet stored (seq -> bleeps). */
+  private readonly bleepOwed = new Map<number, Decision[]>();
+  private readonly fuzzyTimers = new Set<NodeJS.Timeout>();
   private readonly transcriptWindow: Array<{ atMs: number; text: string }> = [];
   private readonly tracker = new SpendTracker();
   private readonly streamStartMs = Date.now();
@@ -202,6 +309,7 @@ export class StreamHost {
     this.viewers.clear();
     this.startedViewers.clear();
     this.publisher = null;
+    this.stopRealtime();
   }
 
   private attachPublisher(ws: WebSocket): void {
@@ -214,6 +322,7 @@ export class StreamHost {
     }
     this.publisher = ws;
     this.resetStream();
+    this.startRealtime();
     ws.on('message', (data, isBinary) => {
       if (isBinary) {
         this.onBinary(Buffer.from(data as Buffer));
@@ -261,13 +370,83 @@ export class StreamHost {
     this.pendingMeta = null;
     this.initSegment = null;
     this.nextSeq = 0;
+    this.lastJpgs = [];
+    this.hysteresis = initialHysteresis();
+    this.lastVisionHitSeq = -1;
+    this.lastWav = null;
+    this.lastWavStudioSeq = -1;
+    this.rtTracker = new OccurrenceTracker();
+    this.realtimeBleepedSeqs.clear();
+    this.bleepOwed.clear();
+    for (const t of this.fuzzyTimers) clearTimeout(t);
+    this.fuzzyTimers.clear();
     this.startedViewers.clear();
+  }
+
+  /** Start the realtime ASR session (live mode only; mock stays scripted). */
+  private startRealtime(): void {
+    this.stopRealtime();
+    if (moderationMode() !== 'live') return;
+    const key = process.env.MODEL_API_KEY;
+    if (!key) {
+      console.log('[realtime] MODEL_API_KEY missing; fallback covers audio');
+      return;
+    }
+    const spellings = bannedSpellings();
+    const keywords = [...new Set(spellings.map((s) => s.spelling))];
+    const session = new RealtimeSession(
+      key,
+      { keywords, languageBias: ['Turkish', 'English'] },
+      {
+        onTranscript: (ev) => this.onRealtimeTranscript(ev),
+        onStateChange: (up) => {
+          this.realtimeUp = up;
+          if (!up) {
+            console.log('[realtime] socket down; fallback covers audio');
+            this.warnStudio(true);
+          } else {
+            console.log('[realtime] socket up');
+            this.warnStudio(false);
+          }
+        },
+        onError: (detail) => console.log(`[realtime] ${detail}`),
+      },
+    );
+    this.realtime = session;
+    session.connect();
+  }
+
+  private stopRealtime(): void {
+    try {
+      this.realtime?.close();
+    } catch {
+      // teardown never throws
+    }
+    this.realtime = null;
+    this.realtimeUp = false;
+    this.realtimeWarned = false;
+  }
+
+  /** Studio health banner for realtime ASR (transitions only). */
+  private warnStudio(active: boolean): void {
+    if (active === this.realtimeWarned) return;
+    this.realtimeWarned = active;
+    if (!this.publisher) return;
+    this.sendJson(this.publisher, {
+      type: 'warning',
+      code: REALTIME_DOWN_CODE,
+      active,
+      message: active
+        ? 'Realtime transcription is down; audio uses whole-chunk fallback bleeps.'
+        : 'Realtime transcription recovered.',
+    } satisfies StudioWarningMessage);
   }
 
   /** End requested: keep serving viewers until the buffer fully plays out. */
   private requestEnd(): void {
     if (this.ending) return;
     this.ending = true;
+    this.realtime?.endInput();
     console.log('[end] broadcast end requested; draining delay buffer for viewers…');
   }
 
@@ -321,6 +500,7 @@ export class StreamHost {
     }
     if (kind === 'wav') {
       pending.wav = data;
+      this.feedRealtime(data, studioSeq);
       const state = this.startedStudio.has(studioSeq)
         ? 'late-orphan'
         : pending.webm
@@ -358,6 +538,29 @@ export class StreamHost {
     }
   }
 
+  /**
+   * Feed one chunk's PCM to realtime ASR, normalized to exactly 2s so the
+   * audioProcessedMs mapping stays aligned even when a capture runs short.
+   */
+  private feedRealtime(wav: Buffer, studioSeq: number): void {
+    if (!this.realtime) return;
+    const parsed = extractWavPcm(wav);
+    if (!parsed || parsed.sampleRate !== 16000 || parsed.channels !== 1 || parsed.bitsPerSample !== 16) {
+      console.log(`[realtime] wav studio=${studioSeq} skipped (need 16kHz mono 16-bit)`);
+      this.feedRealtimeSilence(studioSeq);
+      return;
+    }
+    const pcm = parsed.pcm.length >= CHUNK_PCM_BYTES
+      ? parsed.pcm.subarray(0, CHUNK_PCM_BYTES)
+      : Buffer.concat([parsed.pcm, Buffer.alloc(CHUNK_PCM_BYTES - parsed.pcm.length)]);
+    this.realtime.feedPcm(pcm, studioSeq * 2000);
+  }
+
+  /** Keep the realtime timeline aligned across a missing chunk's audio. */
+  private feedRealtimeSilence(studioSeq: number): void {
+    this.realtime?.feedPcm(Buffer.alloc(CHUNK_PCM_BYTES), studioSeq * 2000);
+  }
+
   private startModeration(studioSeq: number): void {
     const pending = this.pendingMedia.get(studioSeq);
     if (!pending || pending.started || pending.serverSeq === null || !pending.webm) return;
@@ -372,6 +575,26 @@ export class StreamHost {
     const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
     const frameJpgs = pending.jpg;
+    const prevFrameJpgs = this.lastJpgs;
+    this.lastJpgs = frameJpgs;
+    // 4s overlapping fallback window (prev + current chunk, 2s step). The
+    // previous wav must be the adjacent chunk; otherwise the window holds
+    // only this chunk. A missing wav feeds alignment silence to realtime.
+    let windowWav: Buffer | null = wav;
+    let wavPrevMs = 0;
+    if (!wav) {
+      this.feedRealtimeSilence(studioSeq);
+    } else {
+      if (this.lastWav && this.lastWavStudioSeq === studioSeq - 1) {
+        const joined = concatWavs([this.lastWav, wav]);
+        if (joined) {
+          windowWav = joined;
+          wavPrevMs = wavPcmMs(this.lastWav) ?? 0;
+        }
+      }
+      this.lastWav = wav;
+      this.lastWavStudioSeq = studioSeq;
+    }
     const receiptTimeMs = pending.webm.receiptTimeMs;
     this.captureChunk(seq, video, wav, frameJpgs, receiptTimeMs);
     const recentTranscript = this.recentTranscript();
@@ -393,8 +616,10 @@ export class StreamHost {
       moderateChunk({
         seq,
         video,
-        wav,
+        wav: windowWav,
+        wavPrevMs,
         frameJpgs,
+        prevFrameJpgs,
         receivedAtMs: receiptTimeMs,
         recentTranscript,
         tracker: this.tracker,
@@ -416,12 +641,42 @@ export class StreamHost {
             );
             return;
           }
-          const stored = [...res.decisions, ...this.takeOwedPads(seq)];
-          // Only direct rule hits cast a margin: owed pads never cascade.
+          // Spark vision hysteresis: after a hit, the next two chunks blur
+          // even when clean. Applied before pads so only real hits cast margins.
+          const vision = res.debug.visionBreakdown;
+          if (vision) {
+            const hit = vision.decision === 'hit';
+            if (hit) this.lastVisionHitSeq = seq;
+            const next = hysteresisNext(this.hysteresis, hit, vision.topRuleId);
+            this.hysteresis = next.state;
+            if (next.blur && !hit && next.state.lastRuleId) {
+              res.decisions.push(
+                hysteresisBlurDecision(next.state.lastRuleId, this.lastVisionHitSeq),
+              );
+            }
+          }
+          // Fallback whole-chunk bleeps yield to realtime coverage; a
+          // previous-half hit copies a whole bleep onto the chunk before.
+          if (this.realtimeBleepedSeqs.has(seq)) {
+            const before = res.decisions.length;
+            res.decisions = res.decisions.filter(
+              (d) => !(d.action === 'bleep' && d.label === FALLBACK_LABEL),
+            );
+            if (res.decisions.length !== before) res.entry.reason += ' (fallback covered by realtime)';
+          }
+          if (res.debug.fallbackHitPrev && seq - 1 >= 0 && !this.realtimeBleepedSeqs.has(seq - 1)) {
+            const ruleId =
+              res.debug.fallbackRuleId ??
+              res.decisions.find((d) => d.action === 'bleep' && d.label === FALLBACK_LABEL)?.ruleId;
+            if (ruleId) this.applyBleep(seq - 1, fallbackBleepDecision(ruleId));
+          }
+          const stored = [...res.decisions, ...this.takeOwedPads(seq), ...this.takeOwedBleeps(seq)];
+          // Only direct rule hits cast a margin: owed pads and hysteresis
+          // blurs never cascade.
           const directFlags = [
             ...new Set(
               res.decisions
-                .filter((d) => d.action === 'blur' && d.ruleId)
+                .filter((d) => d.action === 'blur' && d.ruleId && d.label !== HYSTERESIS_LABEL)
                 .map((d) => d.ruleId as string),
             ),
           ];
@@ -492,6 +747,138 @@ export class StreamHost {
       if (s === seq) {
         for (const p of pads) out.push(padBlurDecision(p.ruleId, p.fromSeq));
       }
+    }
+    return out;
+  }
+
+  /** Match every realtime partial/final against banned spellings. */
+  private onRealtimeTranscript(ev: { text: string; final: boolean; audioProcessedMs: number; turnId: string }): void {
+    const session = this.realtime;
+    if (!session) return;
+    const baseMs = session.sessionStartStreamMs ?? 0;
+    const tMs = baseMs + ev.audioProcessedMs;
+    this.rtTracker.beginTurn(ev.turnId);
+    const tokens = tokenizeTr(ev.text);
+    if (tokens.length === 0) return;
+    const hits = matchBanned(tokens, bannedSpellings());
+    for (const hit of hits) {
+      if (this.rtTracker.isClaimed(hit.ruleId, hit.token, hit.ordinal)) continue;
+      this.rtTracker.claim(hit.ruleId, hit.token, hit.ordinal);
+      if (hit.exact) {
+        this.applyRealtimeWindow(tMs, hit, false);
+      } else {
+        this.applyFuzzyWindow(tMs, hit, ev.text);
+      }
+    }
+  }
+
+  /** Exact match: bleep [t-1500, t+300] across the overlapped chunks at once. */
+  private applyRealtimeWindow(tMs: number, hit: FuzzyHit, fuzzy: boolean): void {
+    const slices = mapRangeToChunks(tMs - REALTIME_BLEEP_PRE_MS, tMs + REALTIME_BLEEP_POST_MS);
+    for (const s of slices) {
+      this.applyBleep(s.seq, realtimeBleepDecision(hit.ruleId, hit.token, s.startMs, s.endMs, fuzzy));
+    }
+    if (slices.length > 0) {
+      console.log(
+        `[rt-bleep] t=${Math.round(tMs)}ms rule=${hit.ruleId} token="${hit.token}" ` +
+          `fuzzy=${fuzzy} seqs=[${slices.map((s) => s.seq).join(',')}]`,
+      );
+    }
+  }
+
+  /**
+   * Fuzzy-only match: ask the judge, but bleep anyway when the audio leaves
+   * the buffer first (fail-closed). A judge allow cancels the bleep.
+   */
+  private applyFuzzyWindow(tMs: number, hit: FuzzyHit, context: string): void {
+    const slices = mapRangeToChunks(tMs - REALTIME_BLEEP_PRE_MS, tMs + REALTIME_BLEEP_POST_MS);
+    if (slices.length === 0) return;
+    const receiptBySeq = new Map(this.buffer.snapshot().map((c) => [c.seq, c.receiptTimeMs]));
+    const allReleased = slices.every(
+      (s) => !receiptBySeq.has(s.seq) && !this.pendingModeration.has(s.seq) && s.seq < this.nextSeq,
+    );
+    if (allReleased) {
+      console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms already aired; dropping`);
+      return;
+    }
+    const deadlineMs = Math.max(
+      ...slices.map((s) => (receiptBySeq.get(s.seq) ?? Date.now()) + this.buffer.delay),
+    );
+    let resolved = false;
+    const fire = (): void => {
+      if (resolved) return;
+      resolved = true;
+      for (const s of slices) {
+        this.applyBleep(s.seq, realtimeBleepDecision(hit.ruleId, hit.token, s.startMs, s.endMs, true));
+      }
+      console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} fail-closed (no judge verdict in time)`);
+    };
+    const timer = setTimeout(() => {
+      this.fuzzyTimers.delete(timer);
+      fire();
+    }, Math.max(0, deadlineMs - Date.now()));
+    if (typeof timer.unref === 'function') timer.unref();
+    this.fuzzyTimers.add(timer);
+    judgeContext(
+      { recentTranscript: this.recentTranscript(), chunkTranscript: context },
+      'live',
+    )
+      .then((j) => {
+        this.tracker.add(j.costUsd);
+        if (resolved) return;
+        if (j.verdict.action === 'bleep' || j.verdict.action === 'warn') {
+          fire();
+        } else {
+          resolved = true;
+          clearTimeout(timer);
+          this.fuzzyTimers.delete(timer);
+          console.log(`[rt-bleep] fuzzy t=${Math.round(tMs)}ms rule=${hit.ruleId} allowed by judge`);
+        }
+      })
+      .catch(() => {
+        // Judge failure leaves the fail-closed timer to bleep in time.
+      });
+  }
+
+  /**
+   * Attach a bleep to a buffered chunk: stored + still held appends now;
+   * future or still moderating is owed for store time; already released is
+   * too late. Owed/stored bleeps mark the chunk realtime-covered.
+   */
+  private applyBleep(victimSeq: number, decision: Decision): void {
+    if (victimSeq < 0 || this.forceReleased.has(victimSeq)) return;
+    const same = (d: Decision): boolean =>
+      d.action === 'bleep' &&
+      d.ruleId === decision.ruleId &&
+      d.label === decision.label &&
+      d.startMs === decision.startMs &&
+      d.endMs === decision.endMs;
+    const stored = this.decisions.get(victimSeq);
+    if (stored) {
+      if (!this.bufferedSeqs().has(victimSeq)) return;
+      if (!stored.some(same)) stored.push(decision);
+      this.realtimeBleepedSeqs.add(victimSeq);
+      return;
+    }
+    if (
+      victimSeq >= this.nextSeq ||
+      this.bufferedSeqs().has(victimSeq) ||
+      this.pendingModeration.has(victimSeq)
+    ) {
+      const owed = this.bleepOwed.get(victimSeq) ?? [];
+      if (!owed.some(same)) owed.push(decision);
+      this.bleepOwed.set(victimSeq, owed);
+      this.realtimeBleepedSeqs.add(victimSeq);
+    }
+  }
+
+  /** Take owed realtime bleeps for a chunk being stored; prune stale keys. */
+  private takeOwedBleeps(seq: number): Decision[] {
+    const out: Decision[] = [];
+    for (const [s, bleeps] of [...this.bleepOwed]) {
+      if (s > seq) continue;
+      this.bleepOwed.delete(s);
+      if (s === seq) out.push(...bleeps);
     }
     return out;
   }

@@ -86,6 +86,15 @@ function studioFrames(): number {
   return Number.isInteger(raw) && raw >= 1 && raw <= 8 ? raw : 4;
 }
 const STUDIO_FRAMES = studioFrames();
+/**
+ * Canvas capture width. Must match the server FRAME_WIDTH; baked at build
+ * (dev-server restart picks up .env changes).
+ */
+function studioFrameWidth(): number {
+  const raw = Number(process.env.NEXT_PUBLIC_FRAME_WIDTH ?? 640);
+  return Number.isInteger(raw) && raw >= 160 && raw <= 1280 ? raw : 640;
+}
+const STUDIO_FRAME_WIDTH = studioFrameWidth();
 
 export function BroadcastStudio({ showId, accepted }: { showId: string; accepted: boolean }) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -106,6 +115,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const [elapsed, setElapsed] = useState(0);
   const [violations, setViolations] = useState<ModerationLogEntry[]>([]);
   const [toast, setToast] = useState<ModerationLogEntry | null>(null);
+  const [healthWarning, setHealthWarning] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -200,13 +210,13 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     return encodeWav(windowed, 16000);
   }
 
-  /** Mid-chunk canvas grab (320px JPEG) so server ffmpeg stays out of the hot path. */
+  /** Mid-chunk canvas grab (FRAME_WIDTH JPEG) so server ffmpeg stays out of the hot path. */
   function captureFrame(seq: number): void {
     const video = videoRef.current;
     const sock = wsRef.current;
     if (!video || !sock || sock.readyState !== WebSocket.OPEN) return;
     if (video.videoWidth === 0 || video.videoHeight === 0) return;
-    const width = 320;
+    const width = STUDIO_FRAME_WIDTH;
     const height = Math.max(2, Math.round((video.videoHeight / video.videoWidth) * width));
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -264,6 +274,11 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     }
     if (typed.type === 'ended') {
       finishBroadcast();
+      return;
+    }
+    if (typed.type === 'warning') {
+      const warn = msg as { active?: boolean; message?: string };
+      setHealthWarning(warn.active === true && typeof warn.message === 'string' ? warn.message : null);
       return;
     }
     const entry = (msg as { type?: string; entry?: ModerationLogEntry }).entry;
@@ -423,6 +438,14 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
           className="mt-3 aspect-video w-full rounded-md bg-black"
           aria-label="Self-view camera preview"
         />
+        {healthWarning && (
+          <div
+            role="alert"
+            className="absolute bottom-3 left-3 right-3 rounded-md border border-red-400/50 bg-neutral-950/90 p-2 text-xs text-red-200"
+          >
+            {healthWarning}
+          </div>
+        )}
         {toast && (
           <div
             role="status"

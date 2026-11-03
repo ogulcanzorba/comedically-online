@@ -18,8 +18,8 @@ export interface RulesMessage {
  * Publisher -> server: header sent as a JSON text frame immediately before
  * each binary frame. `seq` is the studio's chunk counter; webm, wav, and jpg
  * frames sharing a seq belong to the same 2s window. The jpg is the studio's
- * canvas capture at ~t=1.0s (320px JPEG); without it the server extracts the
- * sample frame from the webm itself.
+ * canvas capture (FRAME_WIDTH JPEG, 4 evenly spaced per chunk); without them
+ * the server extracts sample frames from the webm itself.
  */
 export interface MediaMetaMessage {
   type: 'media';
@@ -62,6 +62,14 @@ export interface DrainProgressMessage {
 /** Server -> publisher: drain complete, stream over. */
 export interface StreamEndedMessage {
   type: 'ended';
+}
+
+/** Server -> publisher: stream health warning (active=false clears it). */
+export interface StudioWarningMessage {
+  type: 'warning';
+  code: string;
+  active: boolean;
+  message: string;
 }
 
 /** Server -> viewer: the delayed stream has fully played out. */
