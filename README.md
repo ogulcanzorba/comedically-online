@@ -33,6 +33,8 @@ npm run dev            # http://localhost:3000
 | `MAX_HOLD_MS` | `4000` | Past delay + hold, unmoderated chunks release censored. |
 | `VOICE_TIMEOUT_MS` / `SAM_TIMEOUT_MS` / `SPARK_TIMEOUT_MS` | `8000` / `20000` / `8000` | Per-model call timeouts. |
 | `SAM_IMAGE_TIMEOUT_MS` | `6000` | SAM image calls: no retries, fail closed fast. |
+| `VISUAL_STRATEGY` | `gate` | Live visual path: `gate` (Spark VLM verdicts) or `sam` (legacy segmentation). |
+| `GATE_FRAMES` / `GATE_TIMEOUT_MS` | `2` / `8000` | VLM calls per chunk over middle frames; per-call timeout. |
 | `MOD_POOL` | `8` | Chunks moderating at once. |
 | `VISUAL_FAIL_MODE` | `closed` | `open` releases failed visuals unblurred with a warning (demo testing). |
 | `FRAMES_PER_CHUNK` / `NEXT_PUBLIC_FRAMES_PER_CHUNK` | `4` / `4` | Frames sampled per chunk (must match); linear image cost, flat wall time. |
@@ -86,10 +88,13 @@ npm run dev            # http://localhost:3000
 chunk + decisions exactly 12s after server receipt. Ending is graceful: the server
 drains the buffer to viewers before end-of-stream, with drain progress to the
 studio. Mock mode scripts bleeps/blurs;
-live mode uses Voice Transcribe + SAM 3.1 (one 320px middle-frame image call per
-video rule, plus a 320px video confirm call on positive chunks only) + the Spark
-judge behind the spend cap. SAM video bills a 50-frame minimum per call, images
-$0.0025 each; clean traffic runs ~$9/stream-hour.
+live mode uses Voice Transcribe + a Spark VLM gate (one structured-verdict call
+per gated frame, minimal reasoning, covering all video rules with rule ids) +
+the Spark judge (minimal reasoning, only on rule candidates) behind the spend
+cap. Audio positives re-transcribe 1s halves in parallel with the judge to pin
+the bleep window to ~1s (word-split fallback: full-chunk turns). Measured live:
+clean chunks ~2-4s wall at ~$2.5/stream-hour; positives ~4-6s. The legacy SAM
+segmentation path stays available via VISUAL_STRATEGY=sam.
 
 ## Checks
 
@@ -106,7 +111,9 @@ npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
 - Single concurrent relay stream shared by all “live” show pages; tickets gate access, not
   the transport. Multi-show isolation is future work.
 - SQLite file is local (no replication); in-memory rate limits reset on restart.
-- Bleep timing is turn-level (Voice returns turns, not words).
-- Live SAM is verified with a key (frame sampling + confirm calls); WebM is
-  transcoded to MP4/JPEG first since SAM rejects WebM. Mock stays the default.
+- Bleep timing is turn-level refined to ~1s halves (Voice returns turns, not
+  words; words split across the half boundary fall back to wider windows).
+- Live visual + audio paths are verified with a key (gate verdicts on real
+  studio frames, waffle bleep on real speech, Turkish transcription). Mock
+  stays the default.
 - No real payments, email, or recording storage — all intentionally mocked or omitted.

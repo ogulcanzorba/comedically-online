@@ -142,6 +142,7 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
   if (!debug) return <span className="text-neutral-600">—</span>;
   const errors = Object.entries(debug.errors);
   const sam = debug.samBreakdown;
+  const gate = debug.gateBreakdown;
   return (
     <details className="text-xs">
       <summary className="cursor-pointer text-neutral-400 hover:text-neutral-200">Debug</summary>
@@ -164,6 +165,9 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
             queue {debug.timingsMs.queueMs}ms · voice {debug.timingsMs.voiceMs}ms · sam{' '}
             {debug.timingsMs.samMs}ms · judge{' '}
             {debug.judgeSkipped ? 'skipped (no rule candidate)' : `${debug.timingsMs.judgeMs}ms`}
+            {debug.timingsMs.halvesMs !== undefined
+              ? ` · halves ${debug.timingsMs.halvesMs}ms`
+              : ''}
           </dd>
         </div>
         {sam && (
@@ -179,6 +183,20 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
                   {c.failedFrames > 0 ? ` failed=${c.failedFrames}` : ''}
                 </span>
               ))}
+            </dd>
+          </div>
+        )}
+        {gate && (
+          <div>
+            <dt className="inline text-neutral-500">gate: </dt>
+            <dd className="inline">
+              {gate.source} extract {gate.extractMs}ms · {gate.ms}ms
+              {gate.frames.map((f) => (
+                <span key={f.frame}>
+                  {' '}· f{f.frame}@{f.frameMs}ms: {f.verdict}
+                </span>
+              ))}
+              {gate.failedFrames > 0 ? ` failed=${gate.failedFrames}` : ''}
             </dd>
           </div>
         )}

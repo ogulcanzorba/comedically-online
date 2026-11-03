@@ -30,6 +30,14 @@ export function sparkTimeoutMs(): number {
   return envMs('SPARK_TIMEOUT_MS', 8_000);
 }
 
+/**
+ * Spark VLM gate timeout per frame call. Default 8s: minimal-effort calls
+ * normally finish in ~2s, so a slow call fails fast into visual fail handling.
+ */
+export function gateTimeoutMs(): number {
+  return envMs('GATE_TIMEOUT_MS', 8_000);
+}
+
 export interface TimeoutScope {
   signal: AbortSignal;
   cancel: () => void;

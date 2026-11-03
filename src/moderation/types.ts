@@ -61,6 +61,8 @@ export interface ChunkTimings {
   voiceMs: number;
   samMs: number;
   judgeMs: number;
+  /** Bleep-timing half-chunk re-transcription (audio positives only). */
+  halvesMs?: number;
 }
 
 /** Per-chunk debug detail: what the models saw, matched, and cost in time. */
@@ -77,6 +79,8 @@ export interface ChunkDebug {
   errors: { voice?: string; sam?: string; judge?: string };
   /** Per-concept SAM breakdown (live visual checks only). */
   samBreakdown?: SamBreakdown;
+  /** VLM gate breakdown (live visual checks via the gate strategy only). */
+  gateBreakdown?: GateBreakdown;
   /** Server receipt time (Date.now()); queueMs is measured from this. */
   receivedAtMs?: number;
 }
@@ -104,4 +108,22 @@ export interface SamBreakdown {
   /** 'client' when the studio's canvas frame was used, else server extract. */
   source: 'client' | 'server';
   concepts: SamConceptDebug[];
+}
+
+/** One gated frame's verdict inside a chunk. */
+export interface GateFrameDebug {
+  /** Index into the chunk's sampled frames. */
+  frame: number;
+  frameMs: number;
+  verdict: 'clean' | 'three-fingers' | 'nose-touch';
+}
+
+/** Where one chunk's gate time went: JPEG extract plus per-frame verdicts. */
+export interface GateBreakdown {
+  extractMs: number;
+  /** 'client' when the studio's canvas frames were used, else server extract. */
+  source: 'client' | 'server';
+  frames: GateFrameDebug[];
+  ms: number;
+  failedFrames: number;
 }

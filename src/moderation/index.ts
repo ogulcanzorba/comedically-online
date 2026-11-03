@@ -1,6 +1,7 @@
 import type {
   ChunkDebug,
   Decision,
+  GateBreakdown,
   ModerationAction,
   ModerationLogEntry,
   ModerationMode,
@@ -8,7 +9,7 @@ import type {
   VisualFlag,
 } from './types';
 import type { TranscriptTurn } from './types';
-import { transcribeChunk } from './transcribe';
+import { transcribeChunk, transcribeHalves } from './transcribe';
 import { detectVisual } from './detect-visual';
 import { judgeContext } from './judge';
 import { audioRuleForTarget, audioRulesMatching, ruleById } from './rulebook';
@@ -80,8 +81,9 @@ export function bleepWindowsForTarget(turns: TranscriptTurn[], target: string): 
     const start = turn.startMs + (idx / turn.transcript.length) * dur - 100;
     const end = turn.startMs + ((idx + needle.length) / turn.transcript.length) * dur + 100;
     windows.push({
-      startMs: Math.max(turn.startMs, Math.round(start)),
-      endMs: Math.min(turn.endMs, Math.round(end)),
+      // Half-chunk turn offsets can be fractional; the player wants integer ms.
+      startMs: Math.max(Math.round(turn.startMs), Math.round(start)),
+      endMs: Math.min(Math.round(turn.endMs), Math.round(end)),
     });
   }
   return windows.length > 0 ? windows : [{ startMs: 0, endMs: 2000 }];
@@ -127,6 +129,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
     ms: number;
     error: string | null;
     detail?: SamBreakdown;
+    gateDetail?: GateBreakdown;
   }> {
     const start = Date.now();
     try {
@@ -137,6 +140,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
         ms: Date.now() - start,
         error: null,
         ...(v.detail ? { detail: v.detail } : {}),
+        ...(v.gateDetail ? { gateDetail: v.gateDetail } : {}),
       };
     } catch (e) {
       return { flags: [], costUsd: 0, ms: Date.now() - start, error: errorDetail(e) };
@@ -197,25 +201,48 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   let judgeMs = 0;
   let judgeError: string | null = null;
   let judgeSkipped = false;
+  let halvesMs: number | undefined;
   if (transcriptText.trim().length > 0) {
     // The judge only acts on rulebook matches, so a transcript with no rule
-    // candidate needs no call at all (saves ~7s and the Spark tokens).
+    // candidate needs no call at all (saves ~2s and the Spark tokens).
     if (audioRulesMatching(transcriptText).length === 0) {
       judgeSkipped = true;
     } else {
       const judgeStart = Date.now();
       try {
-        const j = await judgeContext(
-          { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText },
-          mode,
-        );
+        // Judge and timing refinement run together: halves re-transcription
+        // only feeds the bleep window, so its failure must not lose the
+        // verdict (falls back to full-chunk turns below).
+        const [j, halves] = await Promise.all([
+          judgeContext(
+            { recentTranscript: args.recentTranscript, chunkTranscript: transcriptText },
+            mode,
+          ),
+          transcribeHalves(args.wav, args.seq, mode).catch(
+            (): { turns: TranscriptTurn[]; costUsd: number; ms: number } => ({
+              turns: [],
+              costUsd: 0,
+              ms: -1,
+            }),
+          ),
+        ]);
         judgeMs = Date.now() - judgeStart;
-        costUsd += j.costUsd;
+        halvesMs = halves.ms >= 0 ? halves.ms : judgeMs;
+        costUsd += j.costUsd + halves.costUsd;
         judgeAction = j.verdict.action;
         judgeReason = j.verdict.reason;
         if (j.verdict.action === 'bleep') {
-          const rule = audioRuleForTarget(j.verdict.target ?? '');
-          for (const w of bleepWindowsForTarget(turns, j.verdict.target ?? '')) {
+          const target = j.verdict.target ?? '';
+          // Pin the bleep to the ~1s half holding the word; a word split
+          // across the boundary matches neither half, so fall back to the
+          // full-chunk turns (wider but still covering the word).
+          const timingTurns =
+            target.trim().length > 0 &&
+            halves.turns.some((t) => t.transcript.toLowerCase().includes(target.toLowerCase()))
+              ? halves.turns
+              : turns;
+          const rule = audioRuleForTarget(target);
+          for (const w of bleepWindowsForTarget(timingTurns, target)) {
             decisions.push({
               action: 'bleep',
               reason: rule ? `rule ${rule.id}: ${judgeReason}` : judgeReason,
@@ -286,9 +313,16 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       language: tx.language,
       matchedRule: primary?.ruleId ?? null,
       judgeSkipped,
-      timingsMs: { queueMs, voiceMs: tx.ms, samMs: det.ms, judgeMs },
+      timingsMs: {
+        queueMs,
+        voiceMs: tx.ms,
+        samMs: det.ms,
+        judgeMs,
+        ...(halvesMs !== undefined ? { halvesMs } : {}),
+      },
       errors,
       ...(det.detail ? { samBreakdown: det.detail } : {}),
+      ...(det.gateDetail ? { gateBreakdown: det.gateDetail } : {}),
       ...(args.receivedAtMs ? { receivedAtMs: args.receivedAtMs } : {}),
     },
   };

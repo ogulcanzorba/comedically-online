@@ -1,11 +1,19 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import OpenAI from 'openai';
-import type { ModerationMode, NormBox, SamBreakdown, SamConceptDebug, VisualFlag } from './types';
+import type {
+  GateBreakdown,
+  ModerationMode,
+  NormBox,
+  SamBreakdown,
+  SamConceptDebug,
+  VisualFlag,
+} from './types';
 import { videoBlurRules } from './rulebook';
 import { samUsdForImages } from './cost';
 import { samImageTimeoutMs, startTimeout } from './timeout';
 import { extractSampleJpegs } from './transcode';
+import { gateFrames, pickGateIndices, runGate } from './gate';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
@@ -37,6 +45,15 @@ export function framesPerChunk(): number {
 export function sampleTimesMs(count: number): number[] {
   const n = Math.max(1, Math.floor(count) || 1);
   return Array.from({ length: n }, (_, i) => ((i + 0.5) * CHUNK_MS) / n);
+}
+
+/**
+ * Live visual strategy. `gate` (default) classifies sampled frames with one
+ * Spark VLM call each (~2s, ~$0.0007); `sam` runs SAM segmentation per
+ * concept per frame (~8s each, misses small targets). Mock mode ignores this.
+ */
+export function visualStrategy(): 'gate' | 'sam' {
+  return process.env.VISUAL_STRATEGY === 'sam' ? 'sam' : 'gate';
 }
 
 /** Debug dir for sampled JPEGs when DEBUG_FRAMES=1, else null. */
@@ -235,7 +252,12 @@ export async function detectVisual(
   seq: number,
   mode: ModerationMode,
   frameJpgs: Buffer[] = [],
-): Promise<{ flags: VisualFlag[]; costUsd: number; detail?: SamBreakdown }> {
+): Promise<{
+  flags: VisualFlag[];
+  costUsd: number;
+  detail?: SamBreakdown;
+  gateDetail?: GateBreakdown;
+}> {
   if (mode === 'mock') {
     // Scripted stand-ins, alternating the rulebook's video rules.
     const slot = seq % 6;
@@ -254,10 +276,9 @@ export async function detectVisual(
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
   requireKey(); // fail fast before burning ffmpeg work (clients build per call below)
   // Frame sampling: N 320px JPEGs per chunk (studio canvas captures, or
-  // server ffmpeg fallback). One SAM image request per concept per frame, a
-  // hit on any frame flags the chunk. Failures throw into the pipeline's
-  // visual fail handling (closed/open) only when every frame fails; partial
-  // evidence still moderates.
+  // server ffmpeg fallback). A hit on any frame flags the chunk. Failures
+  // throw into the pipeline's visual fail handling (closed/open) only when
+  // every frame fails; partial evidence still moderates.
   const wantFrames = framesPerChunk();
   const received = frameJpgs.filter((j) => j.length > 0).slice(0, wantFrames);
   let jpegs: Buffer[];
@@ -275,6 +296,9 @@ export async function detectVisual(
   }
   const sampleTimes = sampleTimesMs(jpegs.length);
   saveDebugFrames(seq, jpegs);
+  if (visualStrategy() === 'gate') {
+    return detectVisualGate(seq, mode, jpegs, sampleTimes, source, extractMs);
+  }
   const urls = jpegs.map((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`);
   const settled = await Promise.all(
     conceptsFromRulebook().map(async ({ concept, ruleId }) => {
@@ -337,4 +361,43 @@ export async function detectVisual(
     `[sam] chunk #${seq} src=${source} extract=${extractMs}ms total=+${costUsd.toFixed(4)}`,
   );
   return { flags, costUsd, detail: { extractMs, source, concepts } };
+}
+
+/**
+ * Gate strategy: classify evenly spread frames with one Spark VLM call each
+ * (parallel) instead of SAM segmentation. Same fail semantics: a non-clean
+ * verdict on any frame flags the chunk; all-failed throws.
+ */
+async function detectVisualGate(
+  seq: number,
+  mode: ModerationMode,
+  jpegs: Buffer[],
+  sampleTimes: number[],
+  source: GateBreakdown['source'],
+  extractMs: number,
+): Promise<{
+  flags: VisualFlag[];
+  costUsd: number;
+  detail?: SamBreakdown;
+  gateDetail?: GateBreakdown;
+}> {
+  const indices = pickGateIndices(jpegs.length, gateFrames());
+  const urls = indices.map((i) => `data:image/jpeg;base64,${jpegs[i].toString('base64')}`);
+  const times = indices.map((i) => sampleTimes[i] ?? CHUNK_MS / 2);
+  const g = await runGate(urls, times, seq, mode);
+  return {
+    flags: g.flags,
+    costUsd: g.costUsd,
+    gateDetail: {
+      extractMs,
+      source,
+      frames: indices.map((frame, k) => ({
+        frame,
+        frameMs: times[k],
+        verdict: g.verdicts[k] ?? 'clean',
+      })),
+      ms: g.ms,
+      failedFrames: g.failedFrames,
+    },
+  };
 }

@@ -58,6 +58,13 @@ async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; co
     res = await client.chat.completions.create(
       {
         model: SPARK_MODEL,
+        // Minimal reasoning + a hard cap: this is a narrow rulebook lookup,
+        // and default effort burns ~600 reasoning tokens (~4s, ~$0.003) for
+        // the same verdict. 512 covers reasoning (~100-200) plus the JSON.
+        // 'minimal' rides the wire as a plain string; the cast is only
+        // because this SDK version predates the value in its union type.
+        reasoning_effort: 'minimal' as unknown as 'low',
+        max_tokens: 512,
         response_format: { type: 'json_object' },
         messages: [
           {
@@ -66,6 +73,7 @@ async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; co
               'You are the comedy-aware moderation judge for Comedically Online, a stand-up streaming stage.',
               'Decide if flagged speech is a joke/satire/self-deprecation (allow) or a real attack on a person or group (bleep).',
               'Enforce ONLY the platform rulebook below: bleep speech matching an audio/text rule, allow everything else. There are no comedian-supplied rules.',
+              'Inflected forms count as matches: bleep any word that starts with a rule match spelling (plurals, suffixes), with target set to the exact spoken word.',
               'Actions: allow | bleep (one spoken word/phrase) | warn (borderline whole chunk). Never choose blur (visuals are separate).',
               'Reply with JSON only: {"action":"allow|bleep|warn","reason":"<=140 chars","target":"exact offending word or phrase, bleep only"}.',
               'Omit target unless action is bleep. target must appear verbatim in the chunk transcript.',
