@@ -38,6 +38,17 @@ export function gateTimeoutMs(): number {
   return envMs('GATE_TIMEOUT_MS', 8_000);
 }
 
+/**
+ * Spark multi-frame vision timeout per call. Bounded by MAX_HOLD_MS: a call
+ * that cannot finish inside the max-hold window blurs the chunk instead of
+ * stalling the relay. GATE_TIMEOUT_MS caps it further when lower.
+ */
+export function sparkVisionTimeoutMs(): number {
+  const hold = Number(process.env.MAX_HOLD_MS ?? 4_000);
+  const holdMs = Number.isFinite(hold) && hold > 0 ? hold : 4_000;
+  return Math.min(gateTimeoutMs(), holdMs);
+}
+
 export interface TimeoutScope {
   signal: AbortSignal;
   cancel: () => void;

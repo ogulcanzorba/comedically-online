@@ -7,6 +7,7 @@ import type {
   NormBox,
   SamBreakdown,
   SamConceptDebug,
+  VisionBreakdown,
   VisualFlag,
 } from './types';
 import { videoBlurRules } from './rulebook';
@@ -14,6 +15,7 @@ import { samUsdForImages } from './cost';
 import { samImageTimeoutMs, startTimeout } from './timeout';
 import { extractSampleJpegs } from './transcode';
 import { gateFrames, pickGateIndices, runGate } from './gate';
+import { runSparkVision, sparkVisionEffort, sparkVisionModel } from './spark-vision';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
@@ -51,9 +53,24 @@ export function sampleTimesMs(count: number): number[] {
  * Live visual strategy. `gate` (default) classifies sampled frames with one
  * Spark VLM call each (~2s, ~$0.0007); `sam` runs SAM segmentation per
  * concept per frame (~8s each, misses small targets). Mock mode ignores this.
+ * @deprecated Prefer VISION_BACKEND; kept as a fallback alias.
  */
 export function visualStrategy(): 'gate' | 'sam' {
   return process.env.VISUAL_STRATEGY === 'sam' ? 'sam' : 'gate';
+}
+
+/**
+ * Live vision backend. `spark` (default) classifies last-2-prev + current
+ * frames with ONE Responses API call; `sam` runs legacy segmentation;
+ * `gate` keeps the one-call-per-frame classifier. Unset falls back to the
+ * legacy VISUAL_STRATEGY alias. Mock mode ignores this.
+ */
+export function visionBackend(): 'spark' | 'sam' | 'gate' {
+  const raw = (process.env.VISION_BACKEND ?? '').trim().toLowerCase();
+  if (raw === 'sam' || raw === 'gate' || raw === 'spark') return raw;
+  if (process.env.VISION_BACKEND) return 'spark';
+  if (process.env.VISUAL_STRATEGY) return visualStrategy();
+  return 'spark';
 }
 
 /** Debug dir for sampled JPEGs when DEBUG_FRAMES=1, else null. */
@@ -252,11 +269,13 @@ export async function detectVisual(
   seq: number,
   mode: ModerationMode,
   frameJpgs: Buffer[] = [],
+  prevFrameJpgs: Buffer[] = [],
 ): Promise<{
   flags: VisualFlag[];
   costUsd: number;
   detail?: SamBreakdown;
   gateDetail?: GateBreakdown;
+  visionDetail?: VisionBreakdown;
 }> {
   if (mode === 'mock') {
     // Scripted stand-ins, alternating the rulebook's video rules.
@@ -296,7 +315,11 @@ export async function detectVisual(
   }
   const sampleTimes = sampleTimesMs(jpegs.length);
   saveDebugFrames(seq, jpegs);
-  if (visualStrategy() === 'gate') {
+  const backend = visionBackend();
+  if (backend === 'spark') {
+    return detectVisualSpark(seq, mode, jpegs, prevFrameJpgs);
+  }
+  if (backend === 'gate') {
     return detectVisualGate(seq, mode, jpegs, sampleTimes, source, extractMs);
   }
   const urls = jpegs.map((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`);
@@ -398,6 +421,47 @@ async function detectVisualGate(
       })),
       ms: g.ms,
       failedFrames: g.failedFrames,
+    },
+  };
+}
+
+/**
+ * Spark backend: ONE classifier call over the previous chunk's last 2 frames
+ * plus this chunk's frames. Without prev frames (first chunk, server-only
+ * fallback) the call runs on this chunk's frames alone.
+ */
+async function detectVisualSpark(
+  seq: number,
+  mode: ModerationMode,
+  jpegs: Buffer[],
+  prevFrameJpgs: Buffer[],
+): Promise<{
+  flags: VisualFlag[];
+  costUsd: number;
+  detail?: SamBreakdown;
+  gateDetail?: GateBreakdown;
+  visionDetail?: VisionBreakdown;
+}> {
+  const prev = prevFrameJpgs.filter((j) => j.length > 0).slice(-2);
+  const frames = [...prev, ...jpegs.filter((j) => j.length > 0)];
+  const urls = frames.map((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`);
+  const v = await runSparkVision(urls, prev.length, seq, mode);
+  return {
+    flags: v.flags,
+    costUsd: v.costUsd,
+    visionDetail: {
+      model: sparkVisionModel(),
+      effort: sparkVisionEffort(),
+      frames: urls.length,
+      prevFrames: prev.length,
+      results: v.results,
+      decision: v.decision,
+      topRuleId: v.topRuleId,
+      maxConfidence: v.maxConfidence,
+      secondCall: v.secondCall,
+      ms: v.ms,
+      inputTokens: v.inputTokens,
+      outputTokens: v.outputTokens,
     },
   };
 }

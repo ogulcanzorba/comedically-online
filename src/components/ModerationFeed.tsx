@@ -143,6 +143,7 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
   const errors = Object.entries(debug.errors);
   const sam = debug.samBreakdown;
   const gate = debug.gateBreakdown;
+  const vision = debug.visionBreakdown;
   return (
     <details className="text-xs">
       <summary className="cursor-pointer text-neutral-400 hover:text-neutral-200">Debug</summary>
@@ -197,6 +198,23 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
                 </span>
               ))}
               {gate.failedFrames > 0 ? ` failed=${gate.failedFrames}` : ''}
+            </dd>
+          </div>
+        )}
+        {vision && (
+          <div>
+            <dt className="inline text-neutral-500">vision: </dt>
+            <dd className="inline">
+              {vision.model} {vision.effort}
+              {vision.secondCall ? '->low' : ''} · {vision.frames}f(prev{vision.prevFrames}) ·{' '}
+              {vision.ms}ms · in{vision.inputTokens}/out{vision.outputTokens} ·{' '}
+              {vision.results.map((r) => (
+                <span key={r.id}>
+                  {' '}· {r.id}: {r.confidence.toFixed(2)}
+                  {r.present ? '' : ' (absent)'}
+                </span>
+              ))}{' '}
+              ⇒ {vision.decision}
             </dd>
           </div>
         )}

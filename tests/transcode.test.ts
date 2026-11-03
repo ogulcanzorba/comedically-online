@@ -124,16 +124,40 @@ describe('extractMiddleJpeg', () => {
   const eoi = Buffer.from([0xff, 0xd9]);
   const frame = (tag: string) => Buffer.concat([soi, Buffer.from(tag), eoi]);
 
-  it('returns the middle frame of the decoded window at 320px', async () => {
+  it('returns the middle frame of the decoded window at FRAME_WIDTH', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
-    const out = await extractMiddleJpeg(
-      Buffer.from('WEBMBYTES'),
-      jpegShim(dir, Buffer.concat([frame('F0'), frame('F1'), frame('F2'), frame('F3')])),
-    );
-    assert.ok(out.includes('F2'), `picked: ${out.toString()}`);
-    const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
-    for (const flag of ['scale=320:-2', 'image2pipe', 'mjpeg', 'pipe:0', 'pipe:1']) {
-      assert.ok(argv.includes(flag), `missing ffmpeg arg: ${flag}`);
+    const saved = process.env.FRAME_WIDTH;
+    delete process.env.FRAME_WIDTH;
+    try {
+      const out = await extractMiddleJpeg(
+        Buffer.from('WEBMBYTES'),
+        jpegShim(dir, Buffer.concat([frame('F0'), frame('F1'), frame('F2'), frame('F3')])),
+      );
+      assert.ok(out.includes('F2'), `picked: ${out.toString()}`);
+      const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
+      for (const flag of ['scale=640:-2', 'image2pipe', 'mjpeg', 'pipe:0', 'pipe:1']) {
+        assert.ok(argv.includes(flag), `missing ffmpeg arg: ${flag}`);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.FRAME_WIDTH;
+      else process.env.FRAME_WIDTH = saved;
+    }
+  });
+
+  it('honors FRAME_WIDTH for the extract scale', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const saved = process.env.FRAME_WIDTH;
+    process.env.FRAME_WIDTH = '320';
+    try {
+      await extractMiddleJpeg(
+        Buffer.from('WEBMBYTES'),
+        jpegShim(dir, Buffer.concat([frame('F0'), frame('F1')])),
+      );
+      const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
+      assert.ok(argv.includes('scale=320:-2'), `argv: ${argv}`);
+    } finally {
+      if (saved === undefined) delete process.env.FRAME_WIDTH;
+      else process.env.FRAME_WIDTH = saved;
     }
     assert.equal(readFileSync(join(dir, 'stdin.bin'), 'utf8'), 'WEBMBYTES');
   });

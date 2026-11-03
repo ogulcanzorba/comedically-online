@@ -5,7 +5,14 @@ export const PRICING = {
   samImagePerImageUsd: 0.0025,
   sparkInputPerMillionTokensUsd: 1.25,
   sparkOutputPerMillionTokensUsd: 4.25,
+  sparkContributorInputPerMillionTokensUsd: 0.1,
+  sparkContributorOutputPerMillionTokensUsd: 0.2,
 } as const;
+
+/** Spark billing tier. Contributor mode bills $0.10/$0.20 per 1M tokens. */
+export function sparkPricingMode(): 'standard' | 'contributor' {
+  return process.env.SPARK_PRICING_MODE === 'contributor' ? 'contributor' : 'standard';
+}
 
 /** SAM bills every video request for at least this many frames. */
 export const SAM_VIDEO_MIN_BILLABLE_FRAMES = 50;
@@ -30,6 +37,12 @@ export function samUsdForImages(images: number): number {
 }
 
 export function sparkUsdForTokens(inputTokens: number, outputTokens: number): number {
+  if (sparkPricingMode() === 'contributor') {
+    return (
+      (inputTokens / 1_000_000) * PRICING.sparkContributorInputPerMillionTokensUsd +
+      (outputTokens / 1_000_000) * PRICING.sparkContributorOutputPerMillionTokensUsd
+    );
+  }
   return (
     (inputTokens / 1_000_000) * PRICING.sparkInputPerMillionTokensUsd +
     (outputTokens / 1_000_000) * PRICING.sparkOutputPerMillionTokensUsd

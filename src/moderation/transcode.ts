@@ -133,7 +133,16 @@ export function splitMjpegStream(stream: Buffer): Buffer[] {
   return starts.map((from, i) => stream.subarray(from, i + 1 < starts.length ? starts[i + 1] : stream.length));
 }
 
-/** Decode one 2s WebM window to its 320px JPEG frames (timestamp-agnostic). */
+/**
+ * Sampled-frame width in px (server extract; the studio canvas matches via
+ * NEXT_PUBLIC_FRAME_WIDTH). Default 640; wider frames cost more input tokens.
+ */
+export function frameWidth(): number {
+  const raw = Number(process.env.FRAME_WIDTH ?? 640);
+  return Number.isInteger(raw) && raw >= 160 && raw <= 1280 ? raw : 640;
+}
+
+/** Decode one 2s WebM window to its JPEG frames (timestamp-agnostic). */
 async function decodeWindowFrames(webm: Buffer, bin: string): Promise<Buffer[]> {
   const out = await runPiped(
     bin,
@@ -144,7 +153,7 @@ async function decodeWindowFrames(webm: Buffer, bin: string): Promise<Buffer[]> 
       '-i',
       'pipe:0',
       '-vf',
-      'scale=320:-2',
+      `scale=${frameWidth()}:-2`,
       '-q:v',
       '4',
       '-f',
@@ -160,7 +169,7 @@ async function decodeWindowFrames(webm: Buffer, bin: string): Promise<Buffer[]> 
 }
 
 /**
- * Extract the middle frame of one 2s WebM window as a 320px JPEG for SAM
+ * Extract the middle frame of one 2s WebM window as a JPEG for SAM
  * image segmentation. Middle-by-count is timestamp-agnostic (MediaRecorder
  * timeslice chunks carry absolute stream timestamps, so `-ss 1.0` would
  * misfire on every chunk past the first) and lands at t≈1.0s for uniform
@@ -178,7 +187,7 @@ export async function extractMiddleJpeg(webm: Buffer, ffmpeg = resolveFfmpeg()):
 }
 
 /**
- * Sample `count` evenly spaced 320px JPEGs from one 2s window (fraction
+ * Sample `count` evenly spaced JPEGs from one 2s window (fraction
  * (i+0.5)/count, mirroring the browser's capture times). More frames catch
  * briefer gestures at linear image cost; wall latency stays flat since all
  * concept calls run in parallel.

@@ -81,6 +81,12 @@ export interface ChunkDebug {
   samBreakdown?: SamBreakdown;
   /** VLM gate breakdown (live visual checks via the gate strategy only). */
   gateBreakdown?: GateBreakdown;
+  /** Spark classifier breakdown (live visual checks via spark only). */
+  visionBreakdown?: VisionBreakdown;
+  /** Fallback window hit the previous chunk's half: bleep it in full too. */
+  fallbackHitPrev?: boolean;
+  /** Rule behind a fallback whole-chunk bleep (for the relay's prev-chunk copy). */
+  fallbackRuleId?: string;
   /** Server receipt time (Date.now()); queueMs is measured from this. */
   receivedAtMs?: number;
 }
@@ -126,4 +132,30 @@ export interface GateBreakdown {
   frames: GateFrameDebug[];
   ms: number;
   failedFrames: number;
+}
+
+/** One rule's verdict from the Spark multi-frame classifier. */
+export interface VisionRuleResult {
+  id: string;
+  present: boolean;
+  confidence: number;
+  /** 0-based indices into the call's labeled frames. */
+  frameIndices: number[];
+}
+
+/** Where one chunk's Spark vision time/tokens went. */
+export interface VisionBreakdown {
+  model: string;
+  effort: string;
+  /** Frames in the call (prev overlap + current). */
+  frames: number;
+  prevFrames: number;
+  results: VisionRuleResult[];
+  decision: 'hit' | 'clean';
+  topRuleId: string | null;
+  maxConfidence: number;
+  secondCall: boolean;
+  ms: number;
+  inputTokens: number;
+  outputTokens: number;
 }
