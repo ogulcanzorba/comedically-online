@@ -1,4 +1,5 @@
 import { activeBlursAt, isBleepedAt, type CensorPlan } from './censor-plan';
+import { blurPx, PIXEL_BLOCK } from './blur';
 
 /**
  * Render a censored video file in the browser: frames are redrawn on a
@@ -57,17 +58,40 @@ export async function renderCensoredVideo(
   });
 
   let raf = 0;
+  const tiny = document.createElement('canvas');
+  const tinyCtx = tiny.getContext('2d');
+  const radius = blurPx();
   const draw = (): void => {
     const t = video.currentTime;
     ctx.filter = 'none';
     ctx.drawImage(video, 0, 0, width, height);
     for (const box of activeBlursAt(plan, t)) {
+      const x = Math.round(box.x * width);
+      const y = Math.round(box.y * height);
+      const w = Math.max(1, Math.round(box.w * width));
+      const h = Math.max(1, Math.round(box.h * height));
       ctx.save();
       ctx.beginPath();
-      ctx.rect(box.x * width, box.y * height, box.w * width, box.h * height);
+      ctx.rect(x, y, w, h);
       ctx.clip();
-      ctx.filter = 'blur(12px)';
-      ctx.drawImage(canvas, 0, 0);
+      if (tinyCtx) {
+        // Pixelate first (downscale then hard upscale), then blur on top:
+        // the region stays unrecognisable even on a paused frame.
+        const tw = Math.max(1, Math.round(w / PIXEL_BLOCK));
+        const th = Math.max(1, Math.round(h / PIXEL_BLOCK));
+        tiny.width = tw;
+        tiny.height = th;
+        tinyCtx.filter = 'none';
+        tinyCtx.imageSmoothingEnabled = true;
+        tinyCtx.drawImage(canvas, x, y, w, h, 0, 0, tw, th);
+        ctx.filter = `blur(${radius}px)`;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(tiny, 0, 0, tw, th, x, y, w, h);
+        ctx.imageSmoothingEnabled = true;
+      } else {
+        ctx.filter = `blur(${radius}px)`;
+        ctx.drawImage(canvas, 0, 0);
+      }
       ctx.restore();
     }
     ctx.filter = 'none';

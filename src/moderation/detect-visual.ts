@@ -462,6 +462,7 @@ async function detectVisualSpark(
       ms: v.ms,
       inputTokens: v.inputTokens,
       outputTokens: v.outputTokens,
+      frameVerdicts: v.frameVerdicts,
     },
   };
 }

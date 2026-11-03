@@ -7,8 +7,14 @@ import { DelayBuffer } from '../lib/delay-buffer';
 import { Semaphore } from '../lib/semaphore';
 import { FALLBACK_LABEL, mergeBleepWindow, moderateChunk, moderationMode } from '../moderation/index';
 import { audioBleepRules, ruleById } from '../moderation/rulebook';
-import { hysteresisNext, initialHysteresis } from '../moderation/spark-vision';
-import type { HysteresisState } from '../moderation/spark-vision';
+import {
+  computeBlurWindows,
+  mergeFrameVerdicts,
+  releaseCleanFrames,
+  sliceWindowsToChunk,
+  VISION_RANGE_MARGIN_MS,
+} from '../moderation/spark-vision';
+import type { BlurWindow, FrameVerdict } from '../moderation/spark-vision';
 import { judgeContext } from '../moderation/judge';
 import { isNearExact, matchBanned, OccurrenceTracker, tokenizeTr } from '../moderation/fuzzy';
 import type { BannedSpelling, FuzzyHit } from '../moderation/fuzzy';
@@ -81,9 +87,6 @@ export function blurPadChunks(): number {
 /** Label marking safety-margin decisions (also the dedupe key with ruleId). */
 const PAD_LABEL = 'safety margin';
 
-/** Label marking hysteresis blurs (never cast their own safety margin). */
-const HYSTERESIS_LABEL = 'hysteresis';
-
 /** Labels on realtime scheduled bleeps (exact vs fuzzy-judged). */
 const REALTIME_LABEL = 'realtime';
 const REALTIME_FUZZY_LABEL = 'realtime-fuzzy';
@@ -132,6 +135,9 @@ const FUZZY_JUDGE_BUDGET_MS = 6000;
  */
 const RT_OCCURRENCE_MS = 1000;
 
+/** Frame-verdict history kept per vision rule (covers long held gestures). */
+const VISION_HISTORY_MS = 60_000;
+
 const FULL_FRAME = { x: 0, y: 0, w: 1, h: 1 } as const;
 
 function padBlurDecision(ruleId: string, fromSeq: number): Decision {
@@ -150,17 +156,17 @@ function padBlurDecision(ruleId: string, fromSeq: number): Decision {
   };
 }
 
-function hysteresisBlurDecision(ruleId: string, fromSeq: number): Decision {
+function trackedBlurDecision(ruleId: string, startMs: number, endMs: number): Decision {
   const rule = ruleById(ruleId);
   return {
     action: 'blur',
     reason: rule
-      ? `rule ${rule.id}: gesture seen recently (chunk #${fromSeq}); blurring until 2 consecutive clean chunks`
-      : 'hysteresis blur',
-    startMs: 0,
-    endMs: 2000,
+      ? `rule ${rule.id}: ${rule.title} tracked (${startMs}–${endMs}ms)`
+      : `tracked gesture (${startMs}–${endMs}ms)`,
+    startMs,
+    endMs,
     box: { ...FULL_FRAME },
-    label: HYSTERESIS_LABEL,
+    label: 'tracked blur',
     ruleId,
     ...(rule ? { explanation: rule.explanation } : {}),
   };
@@ -260,9 +266,8 @@ export class StreamHost {
   private readonly log: ModerationLogEntry[] = [];
   /** Previous chunk's canvas frames (Spark vision overlap input). */
   private lastJpgs: Buffer[] = [];
-  /** Spark vision hysteresis (armed by hits, reset per broadcast). */
-  private hysteresis: HysteresisState = initialHysteresis();
-  private lastVisionHitSeq = -1;
+  /** Per-rule frame verdict history for the gesture tracker (reset per broadcast). */
+  private visionFrameHistory = new Map<string, FrameVerdict[]>();
   /** Previous chunk's wav (4s overlapping fallback window). */
   private lastWav: Buffer | null = null;
   private lastWavStudioSeq = -1;
@@ -466,8 +471,7 @@ export class StreamHost {
     this.pendingInit.clear();
     this.nextSeq = 0;
     this.lastJpgs = [];
-    this.hysteresis = initialHysteresis();
-    this.lastVisionHitSeq = -1;
+    this.visionFrameHistory.clear();
     this.lastWav = null;
     this.lastWavStudioSeq = -1;
     this.rtTracker = new OccurrenceTracker();
@@ -737,18 +741,44 @@ export class StreamHost {
             );
             return;
           }
-          // Spark vision hysteresis: after a hit, the next two chunks blur
-          // even when clean. Applied before pads so only real hits cast margins.
+          // Gesture tracker: fold this chunk's per-frame verdicts into the
+          // per-rule history, rebuild the blur windows, and slice them to
+          // this chunk. Applied before pads so tracked hits cast margins.
           const vision = res.debug.visionBreakdown;
-          if (vision) {
-            const hit = vision.decision === 'hit';
-            if (hit) this.lastVisionHitSeq = seq;
-            const next = hysteresisNext(this.hysteresis, hit, vision.topRuleId);
-            this.hysteresis = next.state;
-            if (next.blur && !hit && next.state.lastRuleId) {
-              res.decisions.push(
-                hysteresisBlurDecision(next.state.lastRuleId, this.lastVisionHitSeq),
+          if (vision && vision.frameVerdicts.length > 0) {
+            const chunkStartMs = seq * 2000;
+            const keepFrom = chunkStartMs - VISION_HISTORY_MS;
+            const byRule = new Map<string, FrameVerdict[]>();
+            for (const fv of vision.frameVerdicts) {
+              const list = byRule.get(fv.ruleId) ?? [];
+              list.push({ tMs: fv.tMs, positive: fv.positive });
+              byRule.set(fv.ruleId, list);
+            }
+            const windows: BlurWindow[] = [];
+            for (const [ruleId, incoming] of byRule) {
+              const merged = mergeFrameVerdicts(
+                this.visionFrameHistory.get(ruleId) ?? [],
+                incoming,
+                keepFrom,
               );
+              this.visionFrameHistory.set(ruleId, merged);
+              windows.push(
+                ...computeBlurWindows(merged, ruleId, releaseCleanFrames(), VISION_RANGE_MARGIN_MS),
+              );
+            }
+            const slices = sliceWindowsToChunk(windows, chunkStartMs);
+            for (const s of slices) {
+              res.decisions.push(trackedBlurDecision(s.ruleId, s.startMs, s.endMs));
+            }
+            if (slices.length > 0 && (res.entry.action === 'allow' || res.entry.action === 'warn')) {
+              const first = slices[0];
+              const rule = ruleById(first.ruleId);
+              res.entry.action = 'blur';
+              res.entry.reason =
+                (rule ? `rule ${rule.id}: ${rule.title}` : `rule ${first.ruleId}`) +
+                ` tracked (${first.startMs}–${first.endMs}ms)` +
+                (slices.length > 1 ? ` +${slices.length - 1} more` : '');
+              res.entry.ruleId = first.ruleId;
             }
           }
           // Fallback whole-chunk bleeps yield to realtime coverage; a
@@ -767,12 +797,12 @@ export class StreamHost {
             if (ruleId) this.applyBleep(seq - 1, fallbackBleepDecision(ruleId));
           }
           const stored = [...res.decisions, ...this.takeOwedPads(seq), ...this.takeOwedBleeps(seq)];
-          // Only direct rule hits cast a margin: owed pads and hysteresis
-          // blurs never cascade.
+          // Only direct rule hits cast a margin: owed pads (label 'safety
+          // margin') never cascade, but tracked gesture blurs are real hits.
           const directFlags = [
             ...new Set(
               res.decisions
-                .filter((d) => d.action === 'blur' && d.ruleId && d.label !== HYSTERESIS_LABEL)
+                .filter((d) => d.action === 'blur' && d.ruleId && d.label !== PAD_LABEL)
                 .map((d) => d.ruleId as string),
             ),
           ];

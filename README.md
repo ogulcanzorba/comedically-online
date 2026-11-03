@@ -37,7 +37,8 @@ npm run dev            # http://localhost:3000
 | `SPARK_VISION_MODEL` / `SPARK_VISION_EFFORT` | `muse-spark-1.3` / `minimal` | Classifier model + effort (unsure band retries at `low`). |
 | `VISION_HIT` / `VISION_UNSURE` | `0.5` / `0.3` | Blur at ≥HIT; [UNSURE, HIT) gets a 2nd opinion call. Blur covers first→last positive frame ±250ms. |
 | `VISION_TIMEOUT_MS` | `8000` | Per-call vision budget inside the 12s delay (calls take ~2.2–3.8s). |
-| `HYSTERESIS_CHUNKS` | `1` | Clean chunks blurred past each vision hit. |
+| `RELEASE_CLEAN_FRAMES` | `2` | Consecutive clean frames that release a tracked gesture blur (~1s). |
+| `NEXT_PUBLIC_BLUR_PX` | `28` | Viewer/recap/download blur radius in px (download also pixelates). |
 | `SPARK_PRICING_MODE` | `standard` | `contributor` bills Spark at $0.10/$0.20 per 1M tokens. |
 | `GATE_FRAMES` / `GATE_TIMEOUT_MS` | `2` / `8000` | VLM calls per chunk over middle frames; per-call timeout. |
 | `MOD_POOL` | `8` | Chunks moderating at once. |
@@ -98,8 +99,10 @@ drains the buffer to viewers before end-of-stream, with drain progress to the
 studio. Mock mode scripts bleeps/blurs; live mode behind the spend cap:
 - **Video**: one Spark Responses call per chunk over the previous chunk's last
   2 frames + this chunk's 4 (rulebook-generated prompt, JSON verdicts with
-  per-rule confidence; unsure band gets a `low` 2nd opinion; blur spans the
-  positive frames ±250ms; hysteresis holds 1 chunk past each hit).
+  per-rule confidence; unsure band gets a `low` 2nd opinion; a per-rule frame
+  state machine turns blur on at the first positive frame and off after
+  `RELEASE_CLEAN_FRAMES` clean frames, so a held gesture is one continuous
+  window across chunk boundaries).
   `sam`/`gate` backends stay via `VISION_BACKEND`.
 - **Audio**: realtime ASR over WebSocket (Turkish-aware fuzzy match on every
   partial/final; lag-corrected sub-chunk bleeps ≈ word start−250ms to word

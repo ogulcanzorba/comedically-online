@@ -11,7 +11,7 @@
  *
  * Configs: sam | spark-minimal-320 | spark-minimal-640 | spark-low-640.
  * Spark runs without prev-chunk overlap here (clips are independent); the
- * relay overlaps in production. Hysteresis is not applied (per-chunk only).
+ * relay overlaps in production. The gesture tracker is not applied (per-chunk only).
  * Stops before estimated spend passes the cap (default $1).
  */
 import { readdirSync, readFileSync } from 'node:fs';

@@ -53,8 +53,9 @@ const RULE_DEFINITIONS: Record<string, string> = {
     'three_fingers: exactly three fingers extended and clearly shown toward the camera; ' +
     'ordinary hands, waving, two or four fingers are NOT a match',
   'touching-nose':
-    'finger_on_nose: a fingertip in contact with or within ~1 cm of the nose; ' +
-    'touching chin/cheek/mouth is NOT a match',
+    'finger_on_nose: a fingertip IN CONTACT WITH the nose (actually touching ' +
+    'it, not hovering nearby); a hand merely near the face, waving, holding a ' +
+    'microphone, or touching chin/cheek/mouth/lips while talking is NOT a match',
 };
 
 export interface VisionRuleDef {
@@ -182,44 +183,150 @@ export function decideVision(
   return { decision: 'clean', topRuleId: null, maxConfidence };
 }
 
-/** Hysteresis: after a hit, the next N clean chunks blur even when clean. */
-export interface HysteresisState {
-  armed: boolean;
-  /** Consecutive clean chunks since the last hit (while armed). */
-  cleanStreak: number;
-  lastRuleId: string | null;
-}
-
-/** Clean chunks blurred past each hit (frame-accurate ranges need less cover). */
-export function hysteresisHold(): number {
-  const raw = Number(process.env.HYSTERESIS_CHUNKS ?? 1);
-  return Number.isInteger(raw) && raw >= 0 && raw <= 4 ? raw : 1;
-}
-
-export function initialHysteresis(): HysteresisState {
-  return { armed: false, cleanStreak: 0, lastRuleId: null };
+/** One classifier verdict on one frame (absolute stream ms). */
+export interface FrameVerdict {
+  tMs: number;
+  positive: boolean;
 }
 
 /**
- * Fold one chunk's vision verdict into the hysteresis state. A hit arms (and
- * blurs); while armed the first `hold` consecutive clean chunks still blur,
- * then disarms. Returns whether this chunk must blur plus the next state.
+ * Consecutive clean frames that release a tracked blur. At 4 frames per 2s
+ * chunk each frame covers ~500ms, so the default 2 lifts the blur about one
+ * second after the last positive frame.
  */
-export function hysteresisNext(
-  state: HysteresisState,
-  hit: boolean,
-  ruleId: string | null,
-  hold: number = hysteresisHold(),
-): { blur: boolean; state: HysteresisState } {
-  if (hit) {
-    return { blur: true, state: { armed: true, cleanStreak: 0, lastRuleId: ruleId } };
+export function releaseCleanFrames(): number {
+  const raw = Number(process.env.RELEASE_CLEAN_FRAMES ?? 2);
+  return Number.isInteger(raw) && raw >= 1 && raw <= 8 ? raw : 2;
+}
+
+/**
+ * Per-frame verdicts for one rule from one classifier call. A rule the model
+ * omitted counts as clean on every frame (bounded by the release rule, never
+ * stuck on). Present with empty indices means "somewhere, indices missing":
+ * fail-closed, every frame counts as positive.
+ */
+export function verdictsForRule(
+  result: VisionRuleResult | undefined,
+  frameTimesMs: number[],
+): FrameVerdict[] {
+  if (!result) return frameTimesMs.map((tMs) => ({ tMs, positive: false }));
+  if (result.present && result.frameIndices.length === 0) {
+    return frameTimesMs.map((tMs) => ({ tMs, positive: true }));
   }
-  if (!state.armed) return { blur: false, state };
-  const cleanStreak = state.cleanStreak + 1;
-  if (cleanStreak <= Math.max(0, hold)) {
-    return { blur: true, state: { ...state, cleanStreak } };
+  const positive = new Set(result.frameIndices);
+  return frameTimesMs.map((tMs, i) => ({ tMs, positive: positive.has(i) }));
+}
+
+/**
+ * Merge new verdicts into the per-rule history: sorted by time, duplicates
+ * OR-ed (overlap frames are classified twice, once per adjacent call; either
+ * positive wins), older than `keepFromTms` pruned.
+ */
+export function mergeFrameVerdicts(
+  history: FrameVerdict[],
+  incoming: FrameVerdict[],
+  keepFromTms: number,
+): FrameVerdict[] {
+  const byTime = new Map<number, boolean>();
+  for (const v of [...history, ...incoming]) {
+    if (v.tMs < keepFromTms) continue;
+    byTime.set(v.tMs, (byTime.get(v.tMs) ?? false) || v.positive);
   }
-  return { blur: false, state: { armed: false, cleanStreak: 0, lastRuleId: null } };
+  return [...byTime.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([tMs, positive]) => ({ tMs, positive }));
+}
+
+export interface BlurWindow {
+  ruleId: string;
+  /** Absolute stream ms, margin included. */
+  startMs: number;
+  endMs: number;
+  /** Still on at the last observed frame (extends while frames stay clean). */
+  open: boolean;
+}
+
+/**
+ * Per-rule gesture state machine over the frame sequence. Blur turns ON at
+ * the first positive frame (minus margin), stays on through positives and
+ * brief flicker, and turns OFF only after `cleanToRelease` consecutive clean
+ * frames (plus margin on the last positive). A held gesture is one continuous
+ * window across chunk boundaries.
+ */
+export function computeBlurWindows(
+  verdicts: FrameVerdict[],
+  ruleId: string,
+  cleanToRelease: number,
+  marginMs: number,
+): BlurWindow[] {
+  const ordered = [...verdicts].sort((a, b) => a.tMs - b.tMs);
+  const windows: BlurWindow[] = [];
+  let on = false;
+  let startMs = 0;
+  let lastPositiveTms = 0;
+  let cleanStreak = 0;
+  const releaseAt = Math.max(1, Math.floor(cleanToRelease));
+  for (const v of ordered) {
+    if (v.positive) {
+      if (!on) {
+        on = true;
+        startMs = Math.max(0, v.tMs - marginMs);
+      }
+      lastPositiveTms = v.tMs;
+      cleanStreak = 0;
+    } else if (on) {
+      cleanStreak += 1;
+      if (cleanStreak >= releaseAt) {
+        windows.push({ ruleId, startMs, endMs: lastPositiveTms + marginMs, open: false });
+        on = false;
+        cleanStreak = 0;
+      }
+    }
+  }
+  if (on) {
+    const lastT = ordered.length > 0 ? ordered[ordered.length - 1].tMs : lastPositiveTms;
+    windows.push({ ruleId, startMs, endMs: Math.max(lastPositiveTms, lastT) + marginMs, open: true });
+  }
+  return windows;
+}
+
+export interface ChunkBlurSlice {
+  ruleId: string;
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Slice absolute blur windows to one chunk's relative range. Open windows
+ * extend to the chunk end; later chunks re-slice as the state evolves.
+ */
+export function sliceWindowsToChunk(
+  windows: BlurWindow[],
+  chunkStartMs: number,
+  chunkMs: number = CHUNK_MS,
+): ChunkBlurSlice[] {
+  const out: ChunkBlurSlice[] = [];
+  for (const w of windows) {
+    const startMs = Math.max(0, Math.round(w.startMs - chunkStartMs));
+    const endMs = Math.min(chunkMs, Math.round(w.endMs - chunkStartMs));
+    if (endMs > startMs) out.push({ ruleId: w.ruleId, startMs, endMs });
+  }
+  return out.sort((a, b) => a.startMs - b.startMs || a.ruleId.localeCompare(b.ruleId));
+}
+
+/** Absolute stream-ms centers of one classifier call's frames. */
+export function callFrameTimesMs(seq: number, prevCount: number, currentCount: number): number[] {
+  const n = Math.max(1, currentCount);
+  const spacing = CHUNK_MS / n;
+  const base = seq * CHUNK_MS;
+  const out: number[] = [];
+  for (let j = 0; j < prevCount; j++) {
+    out.push(Math.round(base + (j - prevCount + 0.5) * spacing));
+  }
+  for (let i = 0; i < n; i++) {
+    out.push(Math.round(base + (i + 0.5) * spacing));
+  }
+  return out;
 }
 
 /** Chunk-relative sample times for evenly spaced frames (mirrors detect-visual). */
@@ -350,6 +457,8 @@ export interface SparkVisionResult {
   ms: number;
   inputTokens: number;
   outputTokens: number;
+  /** Per-rule per-frame verdicts (absolute stream ms) for gesture tracking. */
+  frameVerdicts: Array<{ ruleId: string; tMs: number; positive: boolean }>;
 }
 
 /**
@@ -375,6 +484,7 @@ export async function runSparkVision(
     ms: 0,
     inputTokens: 0,
     outputTokens: 0,
+    frameVerdicts: [],
   };
   if (mode === 'mock' || imageUrls.length === 0) return empty;
   const defs = visionRuleDefs();
@@ -446,6 +556,11 @@ export async function runSparkVision(
       `conf=${results.map((r) => `${r.id}:${r.confidence.toFixed(2)}`).join(',') || 'none'} ` +
       `decision=${decision}${secondCall ? ' (2nd opinion)' : ''} +$${costUsd.toFixed(5)}`,
   );
+  const frameTimes = callFrameTimesMs(seq, prevCount, imageUrls.length - prevCount);
+  const frameVerdicts = defs.flatMap((d) => {
+    const result = results.find((r) => r.id === d.id);
+    return verdictsForRule(result, frameTimes).map((v) => ({ ruleId: d.id, ...v }));
+  });
   return {
     flags,
     costUsd,
@@ -457,5 +572,6 @@ export async function runSparkVision(
     ms,
     inputTokens,
     outputTokens,
+    frameVerdicts,
   };
 }

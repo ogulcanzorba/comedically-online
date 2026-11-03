@@ -234,7 +234,12 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   }
   // Video-rule flags censor the whole frame; frame-localized (precise)
   // flags blur only their positive-frame range, the rest the whole chunk.
+  // Spark precise flags are superseded by the relay's gesture tracker (which
+  // rebuilds windows from frameVerdicts across chunks), so they map to no
+  // decision here; mock precise windows still map (no visionDetail in mock).
+  const tracked = det.visionDetail !== undefined;
   for (const flag of det.flags) {
+    if (tracked && flag.precise === true) continue;
     const rule = flag.ruleId ? ruleById(flag.ruleId) : undefined;
     const precise = flag.precise === true;
     const startMs = precise ? Math.max(0, Math.min(2000, Math.round(flag.startMs))) : 0;

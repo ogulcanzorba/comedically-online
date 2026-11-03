@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { activeBlursAt, isBleepedAt, type CensorPlan } from '@/lib/censor-plan';
 import { renderCensoredVideo } from '@/lib/censor-render';
+import { blurPx } from '@/lib/blur';
 
 export interface BroadcastMarker {
   seq: number;
@@ -75,12 +76,14 @@ export function CensoredBroadcastPlayer({
           <div
             key={i}
             aria-hidden="true"
-            className="pointer-events-none absolute rounded-sm bg-black/45 backdrop-blur-md"
+            className="pointer-events-none absolute rounded-sm bg-black/60"
             style={{
               left: `${b.x * 100}%`,
               top: `${b.y * 100}%`,
               width: `${b.w * 100}%`,
               height: `${b.h * 100}%`,
+              backdropFilter: `blur(${blurPx()}px)`,
+              WebkitBackdropFilter: `blur(${blurPx()}px)`,
             }}
           />
         ))}

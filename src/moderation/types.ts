@@ -164,4 +164,6 @@ export interface VisionBreakdown {
   ms: number;
   inputTokens: number;
   outputTokens: number;
+  /** Per-rule per-frame verdicts (absolute stream ms) for gesture tracking. */
+  frameVerdicts: Array<{ ruleId: string; tMs: number; positive: boolean }>;
 }
