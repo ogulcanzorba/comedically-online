@@ -16,12 +16,14 @@ export interface RulesMessage {
 
 /**
  * Publisher -> server: header sent as a JSON text frame immediately before
- * each binary frame. `seq` is the studio's chunk counter; webm and wav
- * frames sharing a seq belong to the same 2s window.
+ * each binary frame. `seq` is the studio's chunk counter; webm, wav, and jpg
+ * frames sharing a seq belong to the same 2s window. The jpg is the studio's
+ * canvas capture at ~t=1.0s (320px JPEG); without it the server extracts the
+ * sample frame from the webm itself.
  */
 export interface MediaMetaMessage {
   type: 'media';
-  kind: 'webm' | 'wav';
+  kind: 'webm' | 'wav' | 'jpg';
   seq: number;
 }
 

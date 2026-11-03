@@ -17,6 +17,14 @@ export function samTimeoutMs(): number {
   return envMs('SAM_TIMEOUT_MS', 20_000);
 }
 
+/**
+ * SAM 3.1 image timeout. Default 6s: image calls normally finish in ~1s, so
+ * a slow call fails closed fast instead of eating pool time with retries.
+ */
+export function samImageTimeoutMs(): number {
+  return envMs('SAM_IMAGE_TIMEOUT_MS', 6_000);
+}
+
 /** muse-spark judge timeout. Default 8s. */
 export function sparkTimeoutMs(): number {
   return envMs('SPARK_TIMEOUT_MS', 8_000);

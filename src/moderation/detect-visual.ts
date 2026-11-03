@@ -4,7 +4,7 @@ import OpenAI from 'openai';
 import type { ModerationMode, NormBox, SamBreakdown, SamConceptDebug, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
 import { samUsdForFrames, samUsdForImages } from './cost';
-import { samTimeoutMs, startTimeout } from './timeout';
+import { samImageTimeoutMs, samTimeoutMs, startTimeout } from './timeout';
 import { extractSampleJpegs, webmToMp4 } from './transcode';
 
 const SAM_MODEL = 'sam-3.1';
@@ -99,15 +99,19 @@ async function segmentMedia(
   ttfbMs: number;
   attempts: number;
 }> {
-  const t = startTimeout(samTimeoutMs());
+  const isImage = mediaPart.type === 'input_image';
+  const t = startTimeout(isImage ? samImageTimeoutMs() : samTimeoutMs());
   // Fresh client per call (no connection state; the runtime fetch pools
   // underneath) so HTTP attempts are attributable to this exact call.
+  // Image calls never retry: a slow call fails closed fast (6s) instead of
+  // eating pool time; the rarer confirm calls keep the SDK default.
   let attempts = 0;
   // Use the runtime fetch (like transcribe.ts) so proxied networks work;
   // identical behavior on direct networks.
   const client = new OpenAI({
     baseURL: 'https://api.meta.ai/v1',
     apiKey: requireKey(),
+    ...(isImage ? { maxRetries: 0 } : { maxRetries: 2 }),
     fetch: (...args: Parameters<typeof fetch>) => {
       attempts += 1;
       return fetch(...args);
@@ -251,6 +255,7 @@ export async function detectVisual(
   video: Buffer | null,
   seq: number,
   mode: ModerationMode,
+  frameJpg: Buffer | null = null,
 ): Promise<{ flags: VisualFlag[]; costUsd: number; detail?: SamBreakdown }> {
   if (mode === 'mock') {
     // Scripted stand-ins, alternating the rulebook's video rules.
@@ -270,13 +275,25 @@ export async function detectVisual(
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
   requireKey(); // fail fast before burning ffmpeg work (clients build per call below)
   // Frame sampling: 320px JPEG(s) from the chunk middle per concept (~0.5s
-  // per call instead of 4-18s for video). Failures throw into the
-  // pipeline's visual fail handling (closed/open), unchanged.
+  // per call instead of 4-18s for video). The studio's canvas capture skips
+  // server ffmpeg entirely; without it (or in 2-frame mode) the server
+  // extracts. Failures throw into the pipeline's visual fail handling
+  // (closed/open), unchanged.
   const frames = framesPerChunk();
   const sampleTimes = SAMPLE_TIMES[frames];
-  const tExtract = Date.now();
-  const jpegs = await extractSampleJpegs(video, frames);
-  const extractMs = Date.now() - tExtract;
+  let jpegs: Buffer[];
+  let extractMs: number;
+  let source: SamBreakdown['source'];
+  if (frameJpg && frameJpg.length > 0 && frames === 1) {
+    jpegs = [frameJpg];
+    extractMs = 0;
+    source = 'client';
+  } else {
+    const tExtract = Date.now();
+    jpegs = await extractSampleJpegs(video, frames);
+    extractMs = Date.now() - tExtract;
+    source = 'server';
+  }
   saveDebugFrames(seq, jpegs);
   const urls = jpegs.map((jpg) => `data:image/jpeg;base64,${jpg.toString('base64')}`);
   // One SAM image request per concept per frame, all in flight at once.
@@ -355,7 +372,7 @@ export async function detectVisual(
     concepts.push(s.conceptDebug);
   }
   console.log(
-    `[sam] chunk #${seq} extract=${extractMs}ms total=+${costUsd.toFixed(4)}`,
+    `[sam] chunk #${seq} src=${source} extract=${extractMs}ms total=+${costUsd.toFixed(4)}`,
   );
-  return { flags, costUsd, detail: { extractMs, concepts } };
+  return { flags, costUsd, detail: { extractMs, source, concepts } };
 }

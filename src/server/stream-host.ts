@@ -38,7 +38,13 @@ export function maxHoldMs(): number {
 }
 
 /** Default moderation pool size. */
-export const DEFAULT_MAX_CONCURRENT = 4;
+export const DEFAULT_MAX_CONCURRENT = 8;
+
+/** Overridable via MOD_POOL (chunks moderating at once). Quota allows 8+. */
+export function maxConcurrent(): number {
+  const raw = Number(process.env.MOD_POOL ?? DEFAULT_MAX_CONCURRENT);
+  return Number.isInteger(raw) && raw > 0 ? raw : DEFAULT_MAX_CONCURRENT;
+}
 
 /**
  * Chunk capture dir for DEBUG_CAPTURE=1 (replayed by `npm run soak:live`).
@@ -55,6 +61,7 @@ const STATS_INTERVAL_MS = 5_000;
 interface PendingMedia {
   webm: { data: Buffer; receiptTimeMs: number } | null;
   wav: Buffer | null;
+  jpg: Buffer | null;
   serverSeq: number | null;
   studioSeq: number;
   timer: NodeJS.Timeout | null;
@@ -98,7 +105,7 @@ export class StreamHost {
     this.buffer = new DelayBuffer<Buffer>(opts.delayMs);
     this.audioWaitMs = opts.audioWaitMs ?? 750;
     this.maxOverdueMs = opts.maxOverdueMs ?? maxHoldMs();
-    this.poolMax = opts.maxConcurrent ?? DEFAULT_MAX_CONCURRENT;
+    this.poolMax = opts.maxConcurrent ?? maxConcurrent();
     this.pool = new Semaphore(this.poolMax);
     this.timer = setInterval(() => {
       this.flush();
@@ -202,7 +209,10 @@ export class StreamHost {
     }
     if (msg.type === 'media') {
       const meta = msg as MediaMetaMessage;
-      if ((meta.kind === 'webm' || meta.kind === 'wav') && Number.isInteger(meta.seq)) {
+      if (
+        (meta.kind === 'webm' || meta.kind === 'wav' || meta.kind === 'jpg') &&
+        Number.isInteger(meta.seq)
+      ) {
         this.pendingMeta = meta;
       }
     }
@@ -216,7 +226,15 @@ export class StreamHost {
     const studioSeq = meta?.seq ?? this.nextSeq;
     let pending = this.pendingMedia.get(studioSeq);
     if (!pending) {
-      pending = { webm: null, wav: null, serverSeq: null, studioSeq, timer: null, started: false };
+      pending = {
+        webm: null,
+        wav: null,
+        jpg: null,
+        serverSeq: null,
+        studioSeq,
+        timer: null,
+        started: false,
+      };
       this.pendingMedia.set(studioSeq, pending);
     }
     if (kind === 'wav') {
@@ -227,6 +245,14 @@ export class StreamHost {
           ? 'paired'
           : 'early';
       console.log(`[rx] wav studio=${studioSeq} (${state}, ${data.length}B)`);
+    } else if (kind === 'jpg') {
+      pending.jpg = data;
+      const state = this.startedStudio.has(studioSeq)
+        ? 'late-orphan'
+        : pending.webm
+          ? 'paired'
+          : 'early';
+      console.log(`[rx] jpg studio=${studioSeq} (${state}, ${data.length}B)`);
     } else {
       const serverSeq = this.nextSeq;
       this.nextSeq += 1;
@@ -261,8 +287,9 @@ export class StreamHost {
     // Playback still uses the original WebM bytes from the delay buffer.
     const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
+    const frameJpg = pending.jpg;
     const receiptTimeMs = pending.webm.receiptTimeMs;
-    this.captureChunk(seq, video, wav, receiptTimeMs);
+    this.captureChunk(seq, video, wav, frameJpg, receiptTimeMs);
     const recentTranscript = this.recentTranscript();
     // Bounded pool: at most poolMax chunks moderate at once, so a pileup
     // queues instead of stampeding the model APIs. Release order still
@@ -283,6 +310,7 @@ export class StreamHost {
         seq,
         video,
         wav,
+        frameJpg,
         receivedAtMs: receiptTimeMs,
         recentTranscript,
         tracker: this.tracker,
@@ -348,16 +376,28 @@ export class StreamHost {
   }
 
   /** DEBUG_CAPTURE=1: persist the exact moderation inputs for soak:live replay. */
-  private captureChunk(seq: number, video: Buffer, wav: Buffer | null, receiptTimeMs: number): void {
+  private captureChunk(
+    seq: number,
+    video: Buffer,
+    wav: Buffer | null,
+    frameJpg: Buffer | null,
+    receiptTimeMs: number,
+  ): void {
     const dir = captureDir();
     if (!dir) return;
     try {
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `chunk${seq}.webm`), video);
       if (wav) writeFileSync(join(dir, `chunk${seq}.wav`), wav);
+      if (frameJpg) writeFileSync(join(dir, `chunk${seq}.jpg`), frameJpg);
       appendFileSync(
         join(dir, 'manifest.jsonl'),
-        JSON.stringify({ seq, receivedAtMs: receiptTimeMs, hasWav: !!wav }) + '\n',
+        JSON.stringify({
+          seq,
+          receivedAtMs: receiptTimeMs,
+          hasWav: !!wav,
+          hasJpg: !!frameJpg,
+        }) + '\n',
       );
     } catch (e) {
       console.log(`[capture] chunk #${seq} save failed: ${e instanceof Error ? e.message : e}`);

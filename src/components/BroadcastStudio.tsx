@@ -86,6 +86,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const liveSinceRef = useRef(0);
   const sendChainRef = useRef(Promise.resolve());
   const toastTimerRef = useRef<number | null>(null);
+  const frameTimerRef = useRef<number | null>(null);
   const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
   const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'ended'>('idle');
   const [error, setError] = useState('');
@@ -120,6 +121,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
       wsRef.current?.close();
       wsRef.current = null;
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
+      if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
     };
   }, []);
 
@@ -185,6 +187,40 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     return encodeWav(windowed, 16000);
   }
 
+  /** Mid-chunk canvas grab (320px JPEG) so server ffmpeg stays out of the hot path. */
+  function captureFrame(seq: number): void {
+    frameTimerRef.current = null;
+    const video = videoRef.current;
+    const sock = wsRef.current;
+    if (!video || !sock || sock.readyState !== WebSocket.OPEN) return;
+    if (video.videoWidth === 0 || video.videoHeight === 0) return;
+    const width = 320;
+    const height = Math.max(2, Math.round((video.videoHeight / video.videoWidth) * width));
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    canvas.getContext('2d')?.drawImage(video, 0, 0, width, height);
+    canvas.toBlob((blob) => {
+      // Null blob: skip silently; the server falls back to ffmpeg extract.
+      if (!blob) return;
+      sendChainRef.current = sendChainRef.current
+        .then(async () => {
+          const s = wsRef.current;
+          if (!s || s.readyState !== WebSocket.OPEN) return;
+          s.send(JSON.stringify({ type: 'media', kind: 'jpg', seq }));
+          s.send(await blob.arrayBuffer());
+        })
+        .catch((e: unknown) => {
+          console.warn(`[studio] frame ${seq} send failed:`, e);
+        });
+    }, 'image/jpeg', 0.7);
+  }
+
+  function scheduleFrameCapture(seq: number): void {
+    if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
+    frameTimerRef.current = window.setTimeout(() => captureFrame(seq), 1000);
+  }
+
   function handlePublisherMessage(ev: MessageEvent): void {
     if (typeof ev.data !== 'string') return;
     let msg: unknown;
@@ -246,6 +282,8 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
         const seq = seqRef.current;
         seqRef.current += 1;
         localRecording.push(seq, ev.data);
+        // A boundary just passed: chunk seq+1 started, grab its middle frame.
+        scheduleFrameCapture(seq + 1);
         // Serialized sends: chunk N+1 never overtakes chunk N, so server seqs
         // match studio seqs exactly (and the local recording stays aligned).
         sendChainRef.current = sendChainRef.current
@@ -266,6 +304,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
           });
       };
       rec.start(2000);
+      scheduleFrameCapture(0);
       liveSinceRef.current = Date.now();
       setElapsed(0);
       setStatus('live');
@@ -279,6 +318,8 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   function endBroadcast(): void {
     recorderRef.current?.stop();
     recorderRef.current = null;
+    if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
+    frameTimerRef.current = null;
     wsRef.current?.close();
     wsRef.current = null;
     stopAudioCapture();

@@ -103,5 +103,7 @@ export interface SamConceptDebug {
 /** Where one chunk's visual time went: JPEG extract plus per-concept calls. */
 export interface SamBreakdown {
   extractMs: number;
+  /** 'client' when the studio's canvas frame was used, else server extract. */
+  source: 'client' | 'server';
   concepts: SamConceptDebug[];
 }

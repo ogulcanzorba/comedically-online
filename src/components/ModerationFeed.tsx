@@ -142,7 +142,7 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
           <div>
             <dt className="inline text-neutral-500">sam: </dt>
             <dd className="inline">
-              extract {sam.extractMs}ms
+              {sam.source} extract {sam.extractMs}ms
               {sam.concepts.map((c) => (
                 <span key={c.ruleId}>
                   {' '}· {c.ruleId}: {c.boxes} boxes

@@ -7,7 +7,13 @@ import { join } from 'node:path';
 import type { WebSocket } from 'ws';
 import { errorDetail, moderateChunk, visualFailMode } from '../src/moderation/index';
 import { SpendTracker } from '../src/moderation/cost';
-import { samTimeoutMs, sparkTimeoutMs, startTimeout, voiceTimeoutMs } from '../src/moderation/timeout';
+import {
+  samImageTimeoutMs,
+  samTimeoutMs,
+  sparkTimeoutMs,
+  startTimeout,
+  voiceTimeoutMs,
+} from '../src/moderation/timeout';
 import { StreamHost } from '../src/server/stream-host';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -145,22 +151,26 @@ describe('transcode failure', () => {
 });
 
 describe('model timeout', () => {
-  it('defaults to 8s voice, 20s sam, 8s spark', () => {
+  it('defaults to 8s voice, 20s sam video, 6s sam image, 8s spark', () => {
     const saved = {
       voice: process.env.VOICE_TIMEOUT_MS,
       sam: process.env.SAM_TIMEOUT_MS,
+      image: process.env.SAM_IMAGE_TIMEOUT_MS,
       spark: process.env.SPARK_TIMEOUT_MS,
     };
     delete process.env.VOICE_TIMEOUT_MS;
     delete process.env.SAM_TIMEOUT_MS;
+    delete process.env.SAM_IMAGE_TIMEOUT_MS;
     delete process.env.SPARK_TIMEOUT_MS;
     try {
       assert.equal(voiceTimeoutMs(), 8000);
       assert.equal(samTimeoutMs(), 20000);
+      assert.equal(samImageTimeoutMs(), 6000);
       assert.equal(sparkTimeoutMs(), 8000);
     } finally {
       if (saved.voice !== undefined) process.env.VOICE_TIMEOUT_MS = saved.voice;
       if (saved.sam !== undefined) process.env.SAM_TIMEOUT_MS = saved.sam;
+      if (saved.image !== undefined) process.env.SAM_IMAGE_TIMEOUT_MS = saved.image;
       if (saved.spark !== undefined) process.env.SPARK_TIMEOUT_MS = saved.spark;
     }
   });

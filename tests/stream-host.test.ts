@@ -5,7 +5,14 @@ import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { WebSocket } from 'ws';
-import { DEFAULT_MAX_OVERDUE_MS, StreamHost, captureDir, maxHoldMs } from '../src/server/stream-host';
+import {
+  DEFAULT_MAX_CONCURRENT,
+  DEFAULT_MAX_OVERDUE_MS,
+  StreamHost,
+  captureDir,
+  maxConcurrent,
+  maxHoldMs,
+} from '../src/server/stream-host';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -51,6 +58,53 @@ describe('maxHoldMs', () => {
   });
 });
 
+describe('maxConcurrent', () => {
+  it('defaults to 8 and honors MOD_POOL', () => {
+    assert.equal(DEFAULT_MAX_CONCURRENT, 8);
+    const saved = process.env.MOD_POOL;
+    delete process.env.MOD_POOL;
+    try {
+      assert.equal(maxConcurrent(), 8);
+      process.env.MOD_POOL = '2';
+      assert.equal(maxConcurrent(), 2);
+      process.env.MOD_POOL = 'junk';
+      assert.equal(maxConcurrent(), 8);
+      process.env.MOD_POOL = '0';
+      assert.equal(maxConcurrent(), 8);
+    } finally {
+      if (saved === undefined) delete process.env.MOD_POOL;
+      else process.env.MOD_POOL = saved;
+    }
+  });
+});
+
+describe('jpg frame pairing', () => {
+  it('accepts studio canvas frames and logs their pairing state', async () => {
+    const lines = await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 10, audioWaitMs: 20 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        pub.emit('message', JSON.stringify({ type: 'media', kind: 'jpg', seq: 0 }), false);
+        pub.emit('message', Buffer.from('jpg-bytes'), true);
+        pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
+        pub.emit('message', Buffer.from('webm-bytes'), true);
+        await sleep(150);
+      } finally {
+        host.close();
+      }
+    });
+    assert.ok(
+      lines.some((l) => l.includes('[rx] jpg studio=0 (early')),
+      'jpg arriving before its webm logs as early',
+    );
+    assert.ok(
+      lines.some((l) => l.startsWith('[debug] chunk #0 ')),
+      'moderation still runs with the frame attached',
+    );
+  });
+});
+
 describe('captureDir', () => {
   it('is off by default, /tmp/chunks on opt-in, overridable for tests', () => {
     const savedCap = process.env.DEBUG_CAPTURE;
@@ -85,6 +139,8 @@ describe('DEBUG_CAPTURE', () => {
         try {
           const pub = fakeSocket([]);
           host.handleConnection(pub, 'publisher');
+          pub.emit('message', JSON.stringify({ type: 'media', kind: 'jpg', seq: 0 }), false);
+          pub.emit('message', Buffer.from('jpg-bytes'), true);
           pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
           pub.emit('message', Buffer.from('webm-bytes'), true);
           pub.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq: 0 }), false);
@@ -94,16 +150,24 @@ describe('DEBUG_CAPTURE', () => {
           host.close();
         }
       });
-      assert.deepEqual(readdirSync(dir).sort(), ['chunk0.wav', 'chunk0.webm', 'manifest.jsonl']);
+      assert.deepEqual(readdirSync(dir).sort(), [
+        'chunk0.jpg',
+        'chunk0.wav',
+        'chunk0.webm',
+        'manifest.jsonl',
+      ]);
       assert.equal(readFileSync(join(dir, 'chunk0.webm'), 'utf8'), 'webm-bytes');
       assert.equal(readFileSync(join(dir, 'chunk0.wav'), 'utf8'), 'wav-bytes');
+      assert.equal(readFileSync(join(dir, 'chunk0.jpg'), 'utf8'), 'jpg-bytes');
       const row = JSON.parse(readFileSync(join(dir, 'manifest.jsonl'), 'utf8').trim()) as {
         seq: number;
         receivedAtMs: number;
         hasWav: boolean;
+        hasJpg: boolean;
       };
       assert.equal(row.seq, 0);
       assert.equal(row.hasWav, true);
+      assert.equal(row.hasJpg, true);
       assert.ok(row.receivedAtMs > 0);
     } finally {
       if (savedCap === undefined) delete process.env.DEBUG_CAPTURE;

@@ -22,6 +22,8 @@ export interface ModerateArgs {
   seq: number;
   video: Buffer | null;
   wav: Buffer | null;
+  /** Studio canvas capture (~t=1.0s); skips server ffmpeg when present. */
+  frameJpg?: Buffer | null;
   recentTranscript: string;
   tracker: SpendTracker;
   /** Server receipt time (Date.now()) for queue-wait measurement. Omit when unknown. */
@@ -128,7 +130,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
   }> {
     const start = Date.now();
     try {
-      const v = await detectVisual(args.video, args.seq, mode);
+      const v = await detectVisual(args.video, args.seq, mode, args.frameJpg ?? null);
       return {
         flags: v.flags,
         costUsd: v.costUsd,

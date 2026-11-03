@@ -18,6 +18,7 @@ interface ManifestRow {
   seq: number;
   receivedAtMs: number;
   hasWav: boolean;
+  hasJpg?: boolean;
 }
 
 function flag(name: string, fallback: string): string {
@@ -56,7 +57,7 @@ function loadManifest(dir: string): ManifestRow[] {
 async function main(): Promise<void> {
   const dir = flag('--dir', '/tmp/chunks');
   const limit = Number(flag('--limit', '0'));
-  const poolMax = Number(flag('--pool', '4'));
+  const poolMax = Number(flag('--pool', '8'));
   if (!process.env.MODEL_API_KEY) {
     console.error('soak:live needs MODEL_API_KEY (live pipeline replay).');
     process.exit(1);
@@ -82,6 +83,7 @@ async function main(): Promise<void> {
         seq: row.seq,
         video: readFileSync(join(dir, `chunk${row.seq}.webm`)),
         wav: row.hasWav ? readFileSync(join(dir, `chunk${row.seq}.wav`)) : null,
+        frameJpg: row.hasJpg ? readFileSync(join(dir, `chunk${row.seq}.jpg`)) : null,
         recentTranscript: recent,
         tracker,
         receivedAtMs: started,
@@ -96,7 +98,8 @@ async function main(): Promise<void> {
       if ((res.debug.samBreakdown?.concepts ?? []).some((c) => c.attempts > 1)) retried += 1;
       const judgeShow = res.debug.judgeSkipped ? 'skip' : t.judgeMs > 0 ? `${t.judgeMs}` : 'n/a';
       console.log(
-        `#${row.seq} q=${t.queueMs} extract=${res.debug.samBreakdown?.extractMs ?? '?'} ` +
+        `#${row.seq} q=${t.queueMs} src=${res.debug.samBreakdown?.source ?? '?'} ` +
+          `extract=${res.debug.samBreakdown?.extractMs ?? '?'} ` +
           `voice=${t.voiceMs} sam=${t.samMs} judge=${judgeShow} ` +
           `act=${res.entry.action} +$${res.costUsd.toFixed(4)} [${concepts}]`,
       );

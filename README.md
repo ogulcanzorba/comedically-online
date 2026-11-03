@@ -32,6 +32,8 @@ npm run dev            # http://localhost:3000
 | `PORT` / `PLAYBACK_DELAY_MS` | `3000` / `12000` | Server port / broadcast delay. |
 | `MAX_HOLD_MS` | `4000` | Past delay + hold, unmoderated chunks release censored. |
 | `VOICE_TIMEOUT_MS` / `SAM_TIMEOUT_MS` / `SPARK_TIMEOUT_MS` | `8000` / `20000` / `8000` | Per-model call timeouts. |
+| `SAM_IMAGE_TIMEOUT_MS` | `6000` | SAM image calls: no retries, fail closed fast. |
+| `MOD_POOL` | `8` | Chunks moderating at once. |
 | `VISUAL_FAIL_MODE` | `closed` | `open` releases failed visuals unblurred with a warning (demo testing). |
 | `SAM_FRAMES_PER_CHUNK` | `1` | `2` samples t≈0.5s/1.5s for briefer gestures (2x image cost, same wall time). |
 | `DEBUG_FRAMES` | off | `1` saves sampled JPEGs to `debug-frames/` (gitignored) with per-concept `[sam]` logs. |
