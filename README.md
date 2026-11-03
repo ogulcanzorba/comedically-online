@@ -78,7 +78,10 @@ npm run dev            # http://localhost:3000
 
 2s WebM chunks + parallel 16kHz WAV over one WebSocket; server ring buffer releases
 chunk + decisions exactly 20s after server receipt. Mock mode scripts bleeps/blurs;
-live mode uses Voice Transcribe + SAM 3.1 video + the Spark judge behind the spend cap.
+live mode uses Voice Transcribe + SAM 3.1 (one 320px middle-frame image call per
+video rule, plus a 320px video confirm call on positive chunks only) + the Spark
+judge behind the spend cap. SAM video bills a 50-frame minimum per call, images
+$0.0025 each; clean traffic runs ~$9/stream-hour.
 
 ## Checks
 
@@ -96,6 +99,6 @@ npm run smoke       # one cheap live call per Meta model (needs MODEL_API_KEY)
   the transport. Multi-show isolation is future work.
 - SQLite file is local (no replication); in-memory rate limits reset on restart.
 - Bleep timing is turn-level (Voice returns turns, not words).
-- Live SAM assumes `video/webm` data URLs are accepted; unverified until `npm run smoke`
-  runs with a key. Mock stays the default.
+- Live SAM is verified with a key (frame sampling + confirm calls); WebM is
+  transcoded to MP4/JPEG first since SAM rejects WebM. Mock stays the default.
 - No real payments, email, or recording storage — all intentionally mocked or omitted.

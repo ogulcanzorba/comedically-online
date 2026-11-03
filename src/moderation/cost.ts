@@ -2,9 +2,13 @@
 export const PRICING = {
   voiceTranscribePerHourUsd: 0.18,
   samVideoPerThousandFramesUsd: 0.2,
+  samImagePerImageUsd: 0.0025,
   sparkInputPerMillionTokensUsd: 1.25,
   sparkOutputPerMillionTokensUsd: 4.25,
 } as const;
+
+/** SAM bills every video request for at least this many frames. */
+export const SAM_VIDEO_MIN_BILLABLE_FRAMES = 50;
 
 /** Hard spend cap per stream (USD). Overriding via env is allowed for rehearsal. */
 export function maxSpendUsd(): number {
@@ -17,7 +21,12 @@ export function voiceUsdForMs(ms: number): number {
 }
 
 export function samUsdForFrames(frames: number): number {
-  return (frames / 1000) * PRICING.samVideoPerThousandFramesUsd;
+  const billable = Math.max(0, Math.round(frames));
+  return (Math.max(billable, SAM_VIDEO_MIN_BILLABLE_FRAMES) / 1000) * PRICING.samVideoPerThousandFramesUsd;
+}
+
+export function samUsdForImages(images: number): number {
+  return Math.max(0, Math.round(images)) * PRICING.samImagePerImageUsd;
 }
 
 export function sparkUsdForTokens(inputTokens: number, outputTokens: number): number {

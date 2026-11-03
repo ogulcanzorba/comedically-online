@@ -45,7 +45,13 @@ function requireKey(): string {
 }
 
 async function liveJudge(input: JudgeInput): Promise<{ verdict: JudgeVerdict; costUsd: number }> {
-  const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
+  // Use the runtime fetch (like transcribe.ts) so proxied networks work;
+  // identical behavior on direct networks.
+  const client = new OpenAI({
+    baseURL: 'https://api.meta.ai/v1',
+    apiKey: requireKey(),
+    fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+  });
   const t = startTimeout(sparkTimeoutMs());
   let res: Awaited<ReturnType<typeof client.chat.completions.create>>;
   try {

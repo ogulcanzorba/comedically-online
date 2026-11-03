@@ -1,13 +1,17 @@
 import OpenAI from 'openai';
 import type { ModerationMode, NormBox, VisualFlag } from './types';
 import { videoBlurRules } from './rulebook';
-import { PRICING } from './cost';
+import { samUsdForFrames, samUsdForImages } from './cost';
 import { samTimeoutMs, startTimeout } from './timeout';
-import { webmToMp4 } from './transcode';
+import { extractMiddleJpeg, webmToMp4 } from './transcode';
 
 const SAM_MODEL = 'sam-3.1';
 /** Each moderation chunk is 2s of media. */
 const CHUNK_MS = 2000;
+/** The sampled middle frame sits at ~t=1.0s of the chunk. */
+const IMAGE_FRAME_MS = CHUNK_MS / 2;
+/** An image hit blurs the frame time ±1s (the whole 2s chunk). */
+const IMAGE_PAD_MS = 1000;
 
 export interface ParsedRecord {
   frame: number;
@@ -50,11 +54,17 @@ function requireKey(): string {
   return key;
 }
 
-async function segmentConcept(
+/** Billing truth from the SAM response; absent when the SDK hides it. */
+interface SamUsage {
+  videoFramesProcessed?: number;
+  imagesProcessed?: number;
+}
+
+async function segmentMedia(
   client: OpenAI,
   concept: string,
-  videoDataUrl: string,
-): Promise<{ records: ParsedRecord[]; frames: number }> {
+  mediaPart: { type: 'input_video'; video_url: string } | { type: 'input_image'; image_url: string },
+): Promise<{ records: ParsedRecord[]; frames: number; usage: SamUsage | null }> {
   const t = startTimeout(samTimeoutMs());
   let text = '';
   try {
@@ -65,10 +75,7 @@ async function segmentConcept(
           {
             type: 'message',
             role: 'user',
-            content: [
-              { type: 'input_text', text: concept },
-              { type: 'input_video', video_url: videoDataUrl },
-            ],
+            content: [{ type: 'input_text', text: concept }, mediaPart],
           },
         ],
       } as unknown as Parameters<typeof client.responses.stream>[0],
@@ -79,13 +86,36 @@ async function segmentConcept(
       if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
     }
     // Aborting a stream can end it silently; a timeout must surface as an error.
-    t.throwIfAborted('sam video');
+    t.throwIfAborted(mediaPart.type === 'input_video' ? 'sam video' : 'sam image');
+    const records = parseSamOutput(text);
+    const frames = records.reduce((max, r) => Math.max(max, r.frame + 1), 0);
+    // Prefer the response's billed usage over parsed output (video bills a
+    // 50-frame minimum; empty responses still cost). Never throws: cost
+    // accounting degrades to the parsed counts.
+    let usage: SamUsage | null = null;
+    try {
+      const withFinal = stream as unknown as {
+        finalResponse?: () => Promise<{ usage?: unknown }>;
+      };
+      const raw = (await withFinal.finalResponse?.())?.usage as {
+        video_frames_processed?: unknown;
+        images_processed?: unknown;
+      } | null;
+      if (raw && typeof raw === 'object') {
+        usage = {
+          ...(typeof raw.video_frames_processed === 'number'
+            ? { videoFramesProcessed: raw.video_frames_processed }
+            : {}),
+          ...(typeof raw.images_processed === 'number' ? { imagesProcessed: raw.images_processed } : {}),
+        };
+      }
+    } catch {
+      usage = null;
+    }
+    return { records, frames, usage };
   } finally {
     t.cancel();
   }
-  const records = parseSamOutput(text);
-  const frames = records.reduce((max, r) => Math.max(max, r.frame + 1), 0);
-  return { records, frames };
 }
 
 /** Collapse per-frame boxes for one object into a single chunk-relative flag. */
@@ -120,6 +150,35 @@ function flagsForConcept(
   return flags;
 }
 
+/**
+ * Collapse single-frame image boxes for one object into a chunk-relative
+ * flag: the returned box over the frame time ±1s.
+ */
+export function flagsForImageHit(
+  concept: string,
+  ruleId: string,
+  records: ParsedRecord[],
+): VisualFlag[] {
+  const byId = new Map<number, ParsedRecord[]>();
+  for (const r of records) {
+    const list = byId.get(r.id) ?? [];
+    list.push(r);
+    byId.set(r.id, list);
+  }
+  const flags: VisualFlag[] = [];
+  for (const [, list] of byId) {
+    list.sort((a, b) => a.frame - b.frame);
+    flags.push({
+      startMs: Math.max(0, IMAGE_FRAME_MS - IMAGE_PAD_MS),
+      endMs: Math.min(CHUNK_MS, IMAGE_FRAME_MS + IMAGE_PAD_MS),
+      box: list[Math.floor(list.length / 2)].box,
+      label: concept,
+      ruleId,
+    });
+  }
+  return flags;
+}
+
 export async function detectVisual(
   video: Buffer | null,
   seq: number,
@@ -141,19 +200,42 @@ export async function detectVisual(
     };
   }
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
-  const client = new OpenAI({ baseURL: 'https://api.meta.ai/v1', apiKey: requireKey() });
-  // SAM rejects WebM: each 2s window is transcoded to MP4 first. Failures
-  // throw into the pipeline's visual fail handling (closed/open).
-  const mp4 = await webmToMp4(video);
-  const videoDataUrl = `data:video/mp4;base64,${mp4.toString('base64')}`;
-  // One SAM request per concept, all in flight at once.
+  // Use the runtime fetch (like transcribe.ts) so proxied networks work;
+  // identical behavior on direct networks.
+  const client = new OpenAI({
+    baseURL: 'https://api.meta.ai/v1',
+    apiKey: requireKey(),
+    fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
+  });
+  // Frame sampling: one 320px JPEG from the chunk middle per concept (~0.5s
+  // per call instead of 4-18s for video). Failures throw into the
+  // pipeline's visual fail handling (closed/open), unchanged.
+  const jpg = await extractMiddleJpeg(video);
+  const imageDataUrl = `data:image/jpeg;base64,${jpg.toString('base64')}`;
+  // One SAM image request per concept, all in flight at once.
   const settled = await Promise.all(
     conceptsFromRulebook().map(async ({ concept, ruleId }) => {
-      const { records, frames } = await segmentConcept(client, concept, videoDataUrl);
-      return {
-        costUsd: (frames / 1000) * PRICING.samVideoPerThousandFramesUsd,
-        flags: flagsForConcept(concept, ruleId, records, frames),
-      };
+      const { records, usage } = await segmentMedia(client, concept, {
+        type: 'input_image',
+        image_url: imageDataUrl,
+      });
+      let costUsd = samUsdForImages(usage?.imagesProcessed ?? 1);
+      const imageFlags = flagsForImageHit(concept, ruleId, records);
+      if (imageFlags.length === 0) return { flags: imageFlags, costUsd };
+      // Confirm step, positive chunks only: a 320px video call refines the
+      // blur window. Any failure keeps the image flag (fail-closed).
+      try {
+        const mp4 = await webmToMp4(video, undefined, 320);
+        const confirm = await segmentMedia(client, concept, {
+          type: 'input_video',
+          video_url: `data:video/mp4;base64,${mp4.toString('base64')}`,
+        });
+        costUsd += samUsdForFrames(confirm.usage?.videoFramesProcessed ?? confirm.frames);
+        const precise = flagsForConcept(concept, ruleId, confirm.records, confirm.frames);
+        return { flags: precise.length > 0 ? precise : imageFlags, costUsd };
+      } catch {
+        return { flags: imageFlags, costUsd };
+      }
     }),
   );
   const flags: VisualFlag[] = [];

@@ -3,7 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, chmodSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { preassembleChunk, resolveFfmpeg, webmToMp4 } from '../src/moderation/transcode';
+import {
+  extractMiddleJpeg,
+  preassembleChunk,
+  resolveFfmpeg,
+  splitMjpegStream,
+  webmToMp4,
+} from '../src/moderation/transcode';
 
 describe('preassembleChunk', () => {
   it('passes the first chunk through untouched', () => {
@@ -76,5 +82,69 @@ describe('webmToMp4', () => {
 
   it('rejects when no ffmpeg is available', async () => {
     await assert.rejects(webmToMp4(Buffer.from('x'), null), /no ffmpeg available/);
+  });
+
+  it('honors the width override for the confirm call', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    await webmToMp4(Buffer.from('WEBMBYTES'), shim(dir, 'ok'), 320);
+    const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
+    assert.ok(argv.includes('scale=320:-2,fps=10'), `argv: ${argv}`);
+  });
+});
+
+describe('splitMjpegStream', () => {
+  const soi = Buffer.from([0xff, 0xd8]);
+  const eoi = Buffer.from([0xff, 0xd9]);
+  const frame = (tag: string) => Buffer.concat([soi, Buffer.from(tag), eoi]);
+
+  it('splits concatenated JPEGs on SOI markers', () => {
+    const out = splitMjpegStream(Buffer.concat([frame('A'), frame('B'), frame('C')]));
+    assert.equal(out.length, 3);
+    assert.ok(out[1].includes('B'));
+  });
+
+  it('returns no frames for a stream without SOI markers', () => {
+    assert.deepEqual(splitMjpegStream(Buffer.from('not-jpeg')), []);
+  });
+});
+
+describe('extractMiddleJpeg', () => {
+  function jpegShim(dir: string, payload: Buffer): string {
+    const path = join(dir, 'ffmpeg-jpeg.sh');
+    const script =
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "${dir}/argv.txt"\ncat > "${dir}/stdin.bin"\n` +
+      `printf '${payload.toString('base64')}' | base64 -d`;
+    writeFileSync(path, script);
+    chmodSync(path, 0o755);
+    return path;
+  }
+  const soi = Buffer.from([0xff, 0xd8]);
+  const eoi = Buffer.from([0xff, 0xd9]);
+  const frame = (tag: string) => Buffer.concat([soi, Buffer.from(tag), eoi]);
+
+  it('returns the middle frame of the decoded window at 320px', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const out = await extractMiddleJpeg(
+      Buffer.from('WEBMBYTES'),
+      jpegShim(dir, Buffer.concat([frame('F0'), frame('F1'), frame('F2'), frame('F3')])),
+    );
+    assert.ok(out.includes('F2'), `picked: ${out.toString()}`);
+    const argv = readFileSync(join(dir, 'argv.txt'), 'utf8');
+    for (const flag of ['scale=320:-2', 'image2pipe', 'mjpeg', 'pipe:0', 'pipe:1']) {
+      assert.ok(argv.includes(flag), `missing ffmpeg arg: ${flag}`);
+    }
+    assert.equal(readFileSync(join(dir, 'stdin.bin'), 'utf8'), 'WEBMBYTES');
+  });
+
+  it('rejects when the window decodes to zero frames', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    await assert.rejects(
+      extractMiddleJpeg(Buffer.from('WEBMBYTES'), jpegShim(dir, Buffer.from('nojpeg'))),
+      /zero frames/,
+    );
+  });
+
+  it('rejects when no ffmpeg is available', async () => {
+    await assert.rejects(extractMiddleJpeg(Buffer.from('x'), null), /no ffmpeg available/);
   });
 });
