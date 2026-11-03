@@ -1,8 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { WebSocket } from 'ws';
-import { DEFAULT_MAX_OVERDUE_MS, StreamHost, maxHoldMs } from '../src/server/stream-host';
+import { DEFAULT_MAX_OVERDUE_MS, StreamHost, captureDir, maxHoldMs } from '../src/server/stream-host';
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -44,6 +47,69 @@ describe('maxHoldMs', () => {
     } finally {
       if (saved === undefined) delete process.env.MAX_HOLD_MS;
       else process.env.MAX_HOLD_MS = saved;
+    }
+  });
+});
+
+describe('captureDir', () => {
+  it('is off by default, /tmp/chunks on opt-in, overridable for tests', () => {
+    const savedCap = process.env.DEBUG_CAPTURE;
+    const savedDir = process.env.CHUNKS_DIR;
+    delete process.env.DEBUG_CAPTURE;
+    delete process.env.CHUNKS_DIR;
+    try {
+      assert.equal(captureDir(), null);
+      process.env.DEBUG_CAPTURE = '1';
+      assert.equal(captureDir(), '/tmp/chunks');
+      process.env.CHUNKS_DIR = '/tmp/custom-chunks';
+      assert.equal(captureDir(), '/tmp/custom-chunks');
+    } finally {
+      if (savedCap === undefined) delete process.env.DEBUG_CAPTURE;
+      else process.env.DEBUG_CAPTURE = savedCap;
+      if (savedDir === undefined) delete process.env.CHUNKS_DIR;
+      else process.env.CHUNKS_DIR = savedDir;
+    }
+  });
+});
+
+describe('DEBUG_CAPTURE', () => {
+  it('persists the exact moderation inputs plus a manifest', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chunks-'));
+    const savedCap = process.env.DEBUG_CAPTURE;
+    const savedDir = process.env.CHUNKS_DIR;
+    process.env.DEBUG_CAPTURE = '1';
+    process.env.CHUNKS_DIR = dir;
+    try {
+      await capture(async () => {
+        const host = new StreamHost({ delayMs: 30, tickMs: 10, audioWaitMs: 20 });
+        try {
+          const pub = fakeSocket([]);
+          host.handleConnection(pub, 'publisher');
+          pub.emit('message', JSON.stringify({ type: 'media', kind: 'webm', seq: 0 }), false);
+          pub.emit('message', Buffer.from('webm-bytes'), true);
+          pub.emit('message', JSON.stringify({ type: 'media', kind: 'wav', seq: 0 }), false);
+          pub.emit('message', Buffer.from('wav-bytes'), true);
+          await sleep(150);
+        } finally {
+          host.close();
+        }
+      });
+      assert.deepEqual(readdirSync(dir).sort(), ['chunk0.wav', 'chunk0.webm', 'manifest.jsonl']);
+      assert.equal(readFileSync(join(dir, 'chunk0.webm'), 'utf8'), 'webm-bytes');
+      assert.equal(readFileSync(join(dir, 'chunk0.wav'), 'utf8'), 'wav-bytes');
+      const row = JSON.parse(readFileSync(join(dir, 'manifest.jsonl'), 'utf8').trim()) as {
+        seq: number;
+        receivedAtMs: number;
+        hasWav: boolean;
+      };
+      assert.equal(row.seq, 0);
+      assert.equal(row.hasWav, true);
+      assert.ok(row.receivedAtMs > 0);
+    } finally {
+      if (savedCap === undefined) delete process.env.DEBUG_CAPTURE;
+      else process.env.DEBUG_CAPTURE = savedCap;
+      if (savedDir === undefined) delete process.env.CHUNKS_DIR;
+      else process.env.CHUNKS_DIR = savedDir;
     }
   });
 });

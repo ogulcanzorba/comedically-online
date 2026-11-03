@@ -77,6 +77,8 @@ export interface ChunkDebug {
   errors: { voice?: string; sam?: string; judge?: string };
   /** Per-concept SAM breakdown (live visual checks only). */
   samBreakdown?: SamBreakdown;
+  /** Server receipt time (Date.now()); queueMs is measured from this. */
+  receivedAtMs?: number;
 }
 
 /** One concept's SAM image result inside a chunk. */
@@ -87,9 +89,15 @@ export interface SamConceptDebug {
   boxes: number;
   /** Mean box confidence when the model reports it, else null. */
   confidence: number | null;
+  /** Time to first response token (server queue + compute + network). */
+  ttfbMs: number;
   ms: number;
+  /** HTTP attempts behind this concept (SDK retries on 408/409/429/5xx). */
+  attempts: number;
   /** True when a video confirm call refined this concept's flags. */
   confirmed: boolean;
+  /** Confirm video call duration, when one ran. */
+  confirmMs: number | null;
 }
 
 /** Where one chunk's visual time went: JPEG extract plus per-concept calls. */

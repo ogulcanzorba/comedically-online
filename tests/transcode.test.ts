@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
   extractMiddleJpeg,
   extractSampleJpegs,
+  ffmpegActiveChildren,
   preassembleChunk,
   resolveFfmpeg,
   splitMjpegStream,
@@ -186,5 +187,19 @@ describe('extractSampleJpegs', () => {
       extractSampleJpegs(Buffer.from('WEBMBYTES'), 2, jpegShim(dir, Buffer.from('nojpeg'))),
       /zero frames/,
     );
+  });
+});
+
+describe('ffmpegActiveChildren', () => {
+  it('counts in-flight children and returns to zero', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'transcode-'));
+    const slow = join(dir, 'ffmpeg-slow.sh');
+    writeFileSync(slow, '#!/bin/sh\nsleep 0.4\ncat > /dev/null\nprintf RAN');
+    chmodSync(slow, 0o755);
+    assert.equal(ffmpegActiveChildren(), 0);
+    const p = webmToMp4(Buffer.from('WEBMBYTES'), slow);
+    assert.equal(ffmpegActiveChildren(), 1);
+    await p;
+    assert.equal(ffmpegActiveChildren(), 0);
   });
 });

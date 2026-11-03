@@ -285,6 +285,7 @@ export async function moderateChunk(args: ModerateArgs): Promise<ModerationResul
       timingsMs: { queueMs, voiceMs: tx.ms, samMs: det.ms, judgeMs },
       errors,
       ...(det.detail ? { samBreakdown: det.detail } : {}),
+      ...(args.receivedAtMs ? { receivedAtMs: args.receivedAtMs } : {}),
     },
   };
 }

@@ -37,4 +37,21 @@ describe('Semaphore', () => {
     assert.deepEqual(order, ['b', 'c']);
     assert.equal(sem.depth, 0);
   });
+
+  it('reports queued waiters via pending', async () => {
+    const sem = new Semaphore(1);
+    const first = await sem.acquire();
+    assert.equal(sem.pending, 0);
+    let released = false;
+    const w = sem.acquire().then((r) => {
+      released = true;
+      r();
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(sem.pending, 1);
+    first();
+    await w;
+    assert.ok(released);
+    assert.equal(sem.pending, 0);
+  });
 });

@@ -5,6 +5,14 @@ import ffmpegStatic from 'ffmpeg-static';
 /** Transcode budget per 2s chunk (ms). Small clips finish in well under a second. */
 export const TRANSCODE_TIMEOUT_MS = 15_000;
 
+/** Currently running ffmpeg child processes (spawned here, not yet reaped). */
+let activeChildren = 0;
+
+/** For the 5s load stats: proves ffmpeg processes are not piling up. */
+export function ffmpegActiveChildren(): number {
+  return activeChildren;
+}
+
 /**
  * Resolve an ffmpeg binary: FFMPEG_PATH first, then the ffmpeg-static bundle,
  * then a system ffmpeg on PATH. Null when none is available.
@@ -41,12 +49,14 @@ export function preassembleChunk(
 function runPiped(bin: string, args: string[], input: Buffer, what: string): Promise<Buffer> {
   return new Promise<Buffer>((resolve, reject) => {
     const child = spawn(bin, args, { signal: AbortSignal.timeout(TRANSCODE_TIMEOUT_MS) });
+    activeChildren += 1;
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     child.stdout.on('data', (d: Buffer) => out.push(d));
     child.stderr.on('data', (d: Buffer) => err.push(d));
     child.on('error', (e) => reject(new Error(`ffmpeg failed to start: ${e.message}`)));
     child.on('close', (code, signal) => {
+      activeChildren = Math.max(0, activeChildren - 1);
       if (code === 0) {
         resolve(Buffer.concat(out));
         return;

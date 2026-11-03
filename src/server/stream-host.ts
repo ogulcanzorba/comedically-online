@@ -1,8 +1,12 @@
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { loadavg } from 'node:os';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 import type { WebSocket } from 'ws';
 import { DelayBuffer } from '../lib/delay-buffer';
 import { Semaphore } from '../lib/semaphore';
 import { moderateChunk, moderationMode } from '../moderation/index';
-import { preassembleChunk } from '../moderation/transcode';
+import { ffmpegActiveChildren, preassembleChunk } from '../moderation/transcode';
 import { SpendTracker, maxSpendUsd, projectedHourlyUsd } from '../moderation/cost';
 import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/types';
 import type {
@@ -35,6 +39,18 @@ export function maxHoldMs(): number {
 
 /** Default moderation pool size. */
 export const DEFAULT_MAX_CONCURRENT = 4;
+
+/**
+ * Chunk capture dir for DEBUG_CAPTURE=1 (replayed by `npm run soak:live`).
+ * CHUNKS_DIR overrides the default /tmp/chunks (tests use a temp dir).
+ */
+export function captureDir(): string | null {
+  if (process.env.DEBUG_CAPTURE !== '1') return null;
+  return process.env.CHUNKS_DIR ?? '/tmp/chunks';
+}
+
+/** How often the [stats] load line prints. */
+const STATS_INTERVAL_MS = 5_000;
 
 interface PendingMedia {
   webm: { data: Buffer; receiptTimeMs: number } | null;
@@ -74,6 +90,9 @@ export class StreamHost {
   private readonly pool: Semaphore;
   private readonly poolMax: number;
   private readonly timer: NodeJS.Timeout;
+  private readonly statsTimer: NodeJS.Timeout;
+  private readonly loopDelay = monitorEventLoopDelay({ resolution: 20 });
+  private lastCpu = process.cpuUsage();
 
   constructor(opts: StreamHostOptions = {}) {
     this.buffer = new DelayBuffer<Buffer>(opts.delayMs);
@@ -85,6 +104,12 @@ export class StreamHost {
       this.flush();
     }, opts.tickMs ?? 250);
     if (typeof this.timer.unref === 'function') this.timer.unref();
+    this.loopDelay.enable();
+    if (typeof (this.loopDelay as unknown as { unref?: () => void }).unref === 'function') {
+      (this.loopDelay as unknown as { unref: () => void }).unref();
+    }
+    this.statsTimer = setInterval(() => this.logStats(), STATS_INTERVAL_MS);
+    if (typeof this.statsTimer.unref === 'function') this.statsTimer.unref();
   }
 
   get delayMs(): number {
@@ -114,6 +139,8 @@ export class StreamHost {
 
   close(): void {
     clearInterval(this.timer);
+    clearInterval(this.statsTimer);
+    this.loopDelay.disable();
     for (const pending of this.pendingMedia.values()) {
       if (pending.timer) clearTimeout(pending.timer);
     }
@@ -209,7 +236,10 @@ export class StreamHost {
       pending.webm = { data, receiptTimeMs };
       pending.serverSeq = serverSeq;
       this.pendingModeration.add(serverSeq);
-      console.log(`[rx] webm studio=${studioSeq} -> server=${serverSeq} (${data.length}B)`);
+      console.log(
+        `[rx] webm studio=${studioSeq} -> server=${serverSeq} (${data.length}B) ` +
+          `at=${new Date(receiptTimeMs).toISOString()}`,
+      );
       pending.timer = setTimeout(() => this.startModeration(studioSeq), this.audioWaitMs);
       if (typeof pending.timer.unref === 'function') pending.timer.unref();
     }
@@ -232,6 +262,7 @@ export class StreamHost {
     const video = preassembleChunk(this.initSegment, pending.webm.data, seq === 0);
     const wav = pending.wav;
     const receiptTimeMs = pending.webm.receiptTimeMs;
+    this.captureChunk(seq, video, wav, receiptTimeMs);
     const recentTranscript = this.recentTranscript();
     // Bounded pool: at most poolMax chunks moderate at once, so a pileup
     // queues instead of stampeding the model APIs. Release order still
@@ -316,6 +347,44 @@ export class StreamHost {
     });
   }
 
+  /** DEBUG_CAPTURE=1: persist the exact moderation inputs for soak:live replay. */
+  private captureChunk(seq: number, video: Buffer, wav: Buffer | null, receiptTimeMs: number): void {
+    const dir = captureDir();
+    if (!dir) return;
+    try {
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `chunk${seq}.webm`), video);
+      if (wav) writeFileSync(join(dir, `chunk${seq}.wav`), wav);
+      appendFileSync(
+        join(dir, 'manifest.jsonl'),
+        JSON.stringify({ seq, receivedAtMs: receiptTimeMs, hasWav: !!wav }) + '\n',
+      );
+    } catch (e) {
+      console.log(`[capture] chunk #${seq} save failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  /** 5s load line: OS load, process CPU, event-loop lag, ffmpeg, pool, sockets. */
+  private logStats(): void {
+    const cpu = process.cpuUsage(this.lastCpu);
+    this.lastCpu = process.cpuUsage();
+    const cpuPct = ((cpu.user + cpu.system) / (STATS_INTERVAL_MS * 1000)) * 100;
+    const sockets = process
+      .getActiveResourcesInfo()
+      .filter((t) => t.toLowerCase().includes('socket')).length;
+    const heapMb = Math.round(process.memoryUsage().heapUsed / 1048576);
+    console.log(
+      `[stats] load=${loadavg()[0].toFixed(2)} cpu=${cpuPct.toFixed(0)}% ` +
+        `loopP50=${(this.loopDelay.mean / 1e6).toFixed(1)}ms ` +
+        `loopP99=${(this.loopDelay.percentile(99) / 1e6).toFixed(1)}ms ` +
+        `loopMax=${(this.loopDelay.max / 1e6).toFixed(0)}ms ` +
+        `ffmpeg=${ffmpegActiveChildren()} pool=${this.pool.depth}/${this.poolMax} ` +
+        `poolQueue=${this.pool.pending} buffer=${this.buffer.size} ` +
+        `socks=${sockets} heap=${heapMb}MB`,
+    );
+    this.loopDelay.reset();
+  }
+
   private recentTranscript(): string {
     const cutoff = Date.now() - 60_000;
     while (this.transcriptWindow.length > 0 && this.transcriptWindow[0].atMs < cutoff) {
@@ -383,7 +452,11 @@ export class StreamHost {
         this.startedViewers.add(ws);
       }
     }
-    console.log(`[tx] released seqs=[${due.map((c) => c.seq).join(',')}]`);
+    const lags = due.map((c) => nowMs - c.receiptTimeMs);
+    console.log(
+      `[tx] released seqs=[${due.map((c) => c.seq).join(',')}] ` +
+        `receipt-to-release=${Math.min(...lags)}..${Math.max(...lags)}ms`,
+    );
   }
 
   private sendChunk(

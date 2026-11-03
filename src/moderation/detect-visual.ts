@@ -90,12 +90,32 @@ interface SamUsage {
 }
 
 async function segmentMedia(
-  client: OpenAI,
   concept: string,
   mediaPart: { type: 'input_video'; video_url: string } | { type: 'input_image'; image_url: string },
-): Promise<{ records: ParsedRecord[]; frames: number; usage: SamUsage | null }> {
+): Promise<{
+  records: ParsedRecord[];
+  frames: number;
+  usage: SamUsage | null;
+  ttfbMs: number;
+  attempts: number;
+}> {
   const t = startTimeout(samTimeoutMs());
+  // Fresh client per call (no connection state; the runtime fetch pools
+  // underneath) so HTTP attempts are attributable to this exact call.
+  let attempts = 0;
+  // Use the runtime fetch (like transcribe.ts) so proxied networks work;
+  // identical behavior on direct networks.
+  const client = new OpenAI({
+    baseURL: 'https://api.meta.ai/v1',
+    apiKey: requireKey(),
+    fetch: (...args: Parameters<typeof fetch>) => {
+      attempts += 1;
+      return fetch(...args);
+    },
+  });
+  const t0 = Date.now();
   let text = '';
+  let ttfbMs = -1;
   try {
     const stream = client.responses.stream(
       {
@@ -112,6 +132,8 @@ async function segmentMedia(
       { signal: t.signal },
     );
     for await (const event of stream) {
+      // First event of any kind: empty responses emit no text deltas at all.
+      if (ttfbMs < 0) ttfbMs = Date.now() - t0;
       const ev = event as { type?: string; delta?: string };
       if (ev.type === 'response.output_text.delta' && typeof ev.delta === 'string') text += ev.delta;
     }
@@ -142,7 +164,7 @@ async function segmentMedia(
     } catch {
       usage = null;
     }
-    return { records, frames, usage };
+    return { records, frames, usage, ttfbMs, attempts };
   } finally {
     t.cancel();
   }
@@ -246,13 +268,7 @@ export async function detectVisual(
     };
   }
   if (!video || video.length === 0) return { flags: [], costUsd: 0 };
-  // Use the runtime fetch (like transcribe.ts) so proxied networks work;
-  // identical behavior on direct networks.
-  const client = new OpenAI({
-    baseURL: 'https://api.meta.ai/v1',
-    apiKey: requireKey(),
-    fetch: (...args: Parameters<typeof fetch>) => fetch(...args),
-  });
+  requireKey(); // fail fast before burning ffmpeg work (clients build per call below)
   // Frame sampling: 320px JPEG(s) from the chunk middle per concept (~0.5s
   // per call instead of 4-18s for video). Failures throw into the
   // pipeline's visual fail handling (closed/open), unchanged.
@@ -268,32 +284,38 @@ export async function detectVisual(
     conceptsFromRulebook().map(async ({ concept, ruleId }) => {
       const t0 = Date.now();
       const perFrame = await Promise.all(
-        urls.map((image_url) =>
-          segmentMedia(client, concept, { type: 'input_image', image_url }),
-        ),
+        urls.map((image_url) => segmentMedia(concept, { type: 'input_image', image_url })),
       );
       const ms = Date.now() - t0;
       let costUsd = 0;
+      let attempts = 0;
       const imageFlags: VisualFlag[] = [];
       const allRecords: ParsedRecord[] = [];
-      perFrame.forEach(({ records, usage }, i) => {
+      perFrame.forEach(({ records, usage, attempts: a }, i) => {
         costUsd += samUsdForImages(usage?.imagesProcessed ?? 1);
+        attempts += a;
         allRecords.push(...records);
         imageFlags.push(...flagsForImageHit(concept, ruleId, records, sampleTimes[i]));
       });
+      const ttfbs = perFrame.map((p) => p.ttfbMs).filter((t) => t >= 0);
+      const ttfbMs = ttfbs.length > 0 ? Math.min(...ttfbs) : -1;
       const boxes = allRecords.length;
       const confidence = meanConfidence(allRecords);
       let confirmed = false;
+      let confirmMs: number | null = null;
       let flags = imageFlags;
       if (imageFlags.length > 0) {
         // Confirm step, positive chunks only: a 320px video call refines the
         // blur window. Any failure keeps the image flags (fail-closed).
         try {
+          const tConfirm = Date.now();
           const mp4 = await webmToMp4(video, undefined, 320);
-          const confirm = await segmentMedia(client, concept, {
+          const confirm = await segmentMedia(concept, {
             type: 'input_video',
             video_url: `data:video/mp4;base64,${mp4.toString('base64')}`,
           });
+          confirmMs = Date.now() - tConfirm;
+          attempts += confirm.attempts;
           costUsd += samUsdForFrames(confirm.usage?.videoFramesProcessed ?? confirm.frames);
           const precise = flagsForConcept(concept, ruleId, confirm.records, confirm.frames);
           if (precise.length > 0) {
@@ -307,15 +329,19 @@ export async function detectVisual(
       console.log(
         `[sam] chunk #${seq} rule=${ruleId} frames=${perFrame.length} ` +
           `boxes=${boxes} conf=${confidence === null ? 'n/a' : confidence.toFixed(2)} ` +
-          `ms=${ms}${confirmed ? ' confirmed' : ''}`,
+          `ttfb=${ttfbMs}ms ms=${ms} attempts=${attempts}` +
+          (confirmMs !== null ? ` confirm=${confirmMs}ms${confirmed ? '(kept)' : '(image-kept)'}` : ''),
       );
       const conceptDebug: SamConceptDebug = {
         ruleId,
         frames: perFrame.length,
         boxes,
         confidence,
+        ttfbMs,
         ms,
+        attempts,
         confirmed,
+        confirmMs,
       };
       return { flags, costUsd, conceptDebug };
     }),

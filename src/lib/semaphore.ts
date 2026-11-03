@@ -12,6 +12,10 @@ export class Semaphore {
     return this.running;
   }
 
+  get pending(): number {
+    return this.waiters.length;
+  }
+
   async acquire(): Promise<() => void> {
     if (this.running < this.max) {
       this.running += 1;

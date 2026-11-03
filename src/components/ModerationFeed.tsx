@@ -146,8 +146,9 @@ function DebugCell({ debug }: { debug: ChunkDebug | undefined }) {
               {sam.concepts.map((c) => (
                 <span key={c.ruleId}>
                   {' '}· {c.ruleId}: {c.boxes} boxes
-                  {c.confidence !== null ? ` (conf ${c.confidence.toFixed(2)})` : ''} {c.ms}ms
-                  {c.confirmed ? ' +confirm' : ''}
+                  {c.confidence !== null ? ` (conf ${c.confidence.toFixed(2)})` : ''} ttfb{' '}
+                  {c.ttfbMs}ms/{c.ms}ms x{c.attempts}
+                  {c.confirmMs !== null ? ` +confirm ${c.confirmMs}ms` : ''}
                 </span>
               ))}
             </dd>
