@@ -50,7 +50,7 @@ describe('live fail-closed', () => {
       assert.equal(res.debug.matchedRule, null);
       assert.ok(res.debug.timingsMs.voiceMs >= 0 && res.debug.timingsMs.samMs >= 0);
       assert.match(res.debug.errors.voice ?? '', /MODEL_API_KEY/);
-      assert.match(res.debug.errors.sam ?? '', /MODEL_API_KEY/);
+      assert.match(res.debug.errors.vision ?? '', /MODEL_API_KEY/);
     } finally {
       if (prevMode === undefined) delete process.env.MODERATION_MODE;
       else process.env.MODERATION_MODE = prevMode;
