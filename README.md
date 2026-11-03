@@ -1,6 +1,19 @@
 # Comedically Online
 
+Demo video: https://www.youtube.com/watch?v=hc-pmiVbB6c
+
+*Built during the Meta AI Developer Hackathon, theme: Build for Your World. AI uses only Meta models.*
+
 **Live comedy. Moderated by someone who gets the joke.**
+
+## Why I built this
+
+I never had the chance to watch the world's famous comedians perform live, because
+they rarely come to my country. I wanted a place where new comedians can promote
+themselves and world-famous comedians can run extra shows for fans everywhere. But
+live comedy has a problem: generic moderation kills streams over a joke, a word, or a
+gesture. So I built Comedically Online: comedy-aware moderation where each show runs
+under a rulebook the comedian accepts, enforced live on a 12-second delay.
 
 Comedically Online is a live-streaming platform built only for stand-up comedians — and
 the moderation is the product. A comedian's act lives or dies on provocative material,
@@ -27,6 +40,7 @@ a nose touch), never real explicit content.
 
 ## Table of contents
 
+- [Why I built this](#why-i-built-this)
 - [How it works (60 seconds)](#how-it-works-60-seconds)
 - [The rulebook](#the-rulebook)
 - [Architecture](#architecture)
@@ -36,8 +50,8 @@ a nose touch), never real explicit content.
 - [Env vars](#env-vars)
 - [Setup and run](#setup-and-run)
 - [Testing](#testing)
-- [Features](#features)
 - [Limitations and honest tradeoffs](#limitations-and-honest-tradeoffs)
+- [Site features (beyond moderation)](#site-features-beyond-moderation)
 - [Project structure](#project-structure)
 
 ## How it works (60 seconds)
@@ -224,8 +238,9 @@ From live runs and the eval scripts (see [Testing](#testing)):
 - **Audio timing:** realtime ASR emission lag measured at 232ms (`REALTIME_LAG_MS`
   default 250); bleeps land ≈ word start−250ms to word end+250ms, one window per
   occurrence.
-- **Cost:** ~$5/stream-hour at 640px frames, ~$2.8/h at 320px (standard Spark
-  pricing); the legacy SAM path measured ~$36/h — one reason Spark is the default.
+- **Cost:** about $3–5 per streaming hour (measured ~$2.8/h at 320px frames,
+  ~$5/h at 640px, standard Spark pricing); the legacy SAM path measured ~$36/h —
+  one reason Spark is the default.
   A per-stream spend tracker + `MAX_SPEND_USD` cap (default $5) falls back to mock
   mode instead of overspending.
 - **Tests:** 223 tests / 96 suites green, plus the end-to-end relay proof with the
@@ -287,7 +302,7 @@ npm run seed:tags      # backfill auto tags (mock rules by default)
 npm run dev            # http://localhost:3000 (custom server: Next + WebSocket relay)
 ```
 
-Demo accounts (password for all: `Comedy123!`):
+Demo accounts (password for all: `Comedy123!`). Fake accounts, local demo data only:
 
 - Comedians: `ada@example.com`, `milo@example.com`, `kerem@example.com`,
   `rosa@example.com`, `benny@example.com`, `ingrid@example.com`, `tomas@example.com`,
@@ -337,41 +352,6 @@ npm run eval:gestures -- <clips-dir>  # backend accuracy/latency/cost table ($1 
 - `soak:live` replays real captured moderation inputs (`DEBUG_CAPTURE=1`) through
   the live pipeline to shake out latency/queue regressions before showtime.
 
-## Features
-
-- **Accounts**: viewer/comedian roles, bcrypt passwords, signed httpOnly sessions,
-  login rate limit, same-origin CSRF guard, 18+ confirmation, server-side validation.
-- **Shows**: public grid with category filter + search, SVG/gradient thumbnails,
-  Live/Sold-out badges; show pages with countdown, viewer-local start time, comedian
-  profile, tiers, tags.
-- **Watch**: at start time the page becomes the player (12s broadcast delay,
-  bleep/blur overlay, never cuts). Requires login + ticket; `/watch` redirects to
-  Demo Night.
-- **Studio** (comedian-only): overview dashboard with tool cards, `/studio/shows`
-  show manager (local time + IANA zone → UTC, tier editor with caps +
-  pay-what-you-want, revenue calculator with stated assumptions), per-show pre-live
-  pages (rulebook acceptance, self-view with violation toasts + timeline and
-  device-local recording (violation clips with censored playback/download + original
-  toggle, full download, never uploaded; history wipes on each new broadcast), live
-  moderation log, censored-moments recap, and in-place broadcast with LIVE badge +
-  elapsed timer (gated on rulebook acceptance). `/studio/go-live` redirects to
-  `/studio` (or the show's prepare page).
-- **Rulebook** (`src/moderation/rulebook.json`, v1.0.0): the data behind all
-  moderation — 1 audio bleep rule ("waffle") + 2 video blur rules (three-finger
-  gesture, nose touch). Every decision records its rule id + user-facing explanation;
-  comedians must accept the current revision before broadcasting, and re-accept when
-  it changes.
-- **Checkout**: mock only (MOCK label everywhere). Card fields never leave the
-  browser; only a fake order record is stored.
-- **Discovery**: 12 category pages with icons, mock/live auto-tagging (`TAG_MODE`),
-  tag chips, `/search?q=`.
-- **Brand/SEO**: ink/spotlight/coral system (`BRAND.md`), self-hosted fonts, SVG logo
-  + favicon, generated OG image, per-page metadata + canonicals, sitemap/robots,
-  JSON-LD (Organization, WebSite, ComedyEvent), skip link + focus styles.
-- **Legal/safety**: terms, privacy, cookies, community guidelines, moderation policy
-  (what the AI does/does not do + human appeals), contact, essential-cookies-only
-  banner, footer.
-
 ## Limitations and honest tradeoffs
 
 - **Single concurrent relay stream** shared by all "live" show pages; tickets gate
@@ -386,10 +366,18 @@ npm run eval:gestures -- <clips-dir>  # backend accuracy/latency/cost table ($1 
   run, plus live smoke tests.
 - **Word timing is approximate.** The realtime path bleeps word ±250ms (emission lag
   corrected); the file fallback bleeps whole chunks where realtime didn't cover.
-- **SAM path is legacy.** It measured ~36 $/h and 4–20s latency vs Spark's ~5 $/h
+- **SAM path is legacy.** It measured ~36 $/h and 4–20s latency vs Spark's ~$3–5/h
   and ~2–4s; it stays behind `VISION_BACKEND=sam` for comparison only.
 - **No real payments, email, or recording storage** — all intentionally mocked or
   omitted for the hackathon scope.
+
+## Site features (beyond moderation)
+
+The platform around the pipeline: accounts with viewer/comedian roles (bcrypt,
+signed sessions, CSRF guard, 18+), show grid with search, categories and tags, show
+pages with countdown and viewer-local start times, mock ticket checkout, comedian
+studio with show manager and revenue calculator, self-hosted brand/SEO setup, and
+template legal pages (terms, privacy, moderation policy with human appeals).
 
 ## Project structure
 
