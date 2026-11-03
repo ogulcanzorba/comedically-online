@@ -43,11 +43,30 @@ export function ShowPlayer() {
     let sourceBuffer: SourceBuffer | null = null;
     let cancelled = false;
     let pendingMeta: ChunkMeta | null = null;
+    let streamEnded = false;
+    let endSignalled = false;
     let raf = 0;
     const queue: QueuedChunk[] = [];
 
+    function signalEnd(): void {
+      if (endSignalled || !mediaSource || !sourceBuffer || sourceBuffer.updating) return;
+      if (mediaSource.readyState !== 'open') return;
+      endSignalled = true;
+      try {
+        mediaSource.endOfStream();
+      } catch {
+        // already ended or closing; status update below still applies
+      }
+      setStatus('Stream ended — thanks for watching.');
+    }
+
     function pump(): void {
-      if (!sourceBuffer || sourceBuffer.updating || queue.length === 0 || !video) return;
+      if (!sourceBuffer || sourceBuffer.updating || !video) return;
+      if (queue.length === 0) {
+        // Drained everything the server sent; end only after its end-of-stream.
+        if (streamEnded) signalEnd();
+        return;
+      }
       const next = queue.shift();
       if (!next) return;
       try {
@@ -102,7 +121,13 @@ export function ShowPlayer() {
     ws.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data === 'string') {
         try {
-          pendingMeta = JSON.parse(ev.data) as ChunkMeta;
+          const msg = JSON.parse(ev.data) as ChunkMeta & { type?: string };
+          if (msg.type === 'end') {
+            streamEnded = true;
+            pump();
+            return;
+          }
+          pendingMeta = msg.type === 'chunk' ? msg : null;
         } catch {
           pendingMeta = null;
         }

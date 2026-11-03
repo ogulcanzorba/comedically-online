@@ -18,6 +18,20 @@ describe('localRecording store', () => {
     assert.equal(localRecording.full(), null);
   });
 
+  it('rebuilds the full recording when blobs land after first build (recap tail)', () => {
+    localRecording.start();
+    localRecording.push(0, new Blob(['a'], { type: 'video/webm' }));
+    localRecording.push(1, new Blob(['b'], { type: 'video/webm' }));
+    const first = localRecording.full();
+    assert.equal(first?.seconds, 4);
+    // Final MediaRecorder flush lands late: recap must include it.
+    localRecording.push(2, new Blob(['c'], { type: 'video/webm' }));
+    const rebuilt = localRecording.full();
+    assert.equal(rebuilt?.seconds, 6);
+    assert.notEqual(rebuilt?.url, first?.url);
+    localRecording.start();
+  });
+
   it('dedupes pushes by seq', () => {
     localRecording.start();
     localRecording.push(0, new Blob(['a']));

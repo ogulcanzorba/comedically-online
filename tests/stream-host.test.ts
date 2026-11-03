@@ -178,6 +178,154 @@ describe('DEBUG_CAPTURE', () => {
   });
 });
 
+describe('graceful end-of-broadcast drain', () => {
+  function publishPair(pub: WebSocket, seq: number): void {
+    (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+      'message',
+      JSON.stringify({ type: 'media', kind: 'webm', seq }),
+      false,
+    );
+    (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+      'message',
+      Buffer.from(`webm-${seq}`),
+      true,
+    );
+    (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+      'message',
+      JSON.stringify({ type: 'media', kind: 'wav', seq }),
+      false,
+    );
+    (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+      'message',
+      Buffer.from(`wav-${seq}`),
+      true,
+    );
+  }
+
+  function strings(sent: unknown[]): Array<Record<string, unknown>> {
+    return sent
+      .filter((d): d is string => typeof d === 'string')
+      .map((s) => JSON.parse(s) as Record<string, unknown>);
+  }
+
+  it('plays out buffered chunks to viewers before end-of-stream', async () => {
+    const viewerSent: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        host.handleConnection(fakeSocket(viewerSent), 'viewer');
+        publishPair(pub, 0);
+        publishPair(pub, 1);
+        (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+          'message',
+          JSON.stringify({ type: 'end-broadcast' }),
+          false,
+        );
+        await sleep(250);
+      } finally {
+        host.close();
+      }
+    });
+    const msgs = strings(viewerSent);
+    const chunks = msgs.filter((m) => m.type === 'chunk');
+    const ends = msgs.filter((m) => m.type === 'end');
+    assert.deepEqual(
+      chunks.map((m) => m.seq),
+      [0, 1],
+      'both delayed chunks reach the viewer',
+    );
+    assert.equal(ends.length, 1, 'exactly one end-of-stream');
+    assert.ok(
+      msgs.indexOf(ends[0]) > msgs.indexOf(chunks[chunks.length - 1]),
+      'end-of-stream arrives only after the last chunk bytes',
+    );
+  });
+
+  it('reports drain progress to the publisher, then ended', async () => {
+    const pubSent: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 60, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket(pubSent);
+        host.handleConnection(pub, 'publisher');
+        publishPair(pub, 0);
+        publishPair(pub, 1);
+        (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+          'message',
+          JSON.stringify({ type: 'end-broadcast' }),
+          false,
+        );
+        await sleep(300);
+      } finally {
+        host.close();
+      }
+    });
+    const msgs = strings(pubSent);
+    const drains = msgs.filter((m) => m.type === 'drain');
+    const ended = msgs.filter((m) => m.type === 'ended');
+    assert.ok(drains.length >= 1, 'at least one drain progress update');
+    assert.ok(
+      drains.every((m) => typeof m.pending === 'number' && (m.pending as number) >= 0),
+      'drain carries a non-negative pending count',
+    );
+    assert.equal(ended.length, 1, 'exactly one ended notification');
+    assert.ok(
+      msgs.indexOf(ended[0]) > msgs.indexOf(drains[drains.length - 1]),
+      'ended arrives after the last drain update',
+    );
+  });
+
+  it('still ends viewers cleanly when the publisher vanishes without end-broadcast', async () => {
+    const viewerSent: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        host.handleConnection(fakeSocket(viewerSent), 'viewer');
+        publishPair(pub, 0);
+        (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit('close');
+        await sleep(250);
+      } finally {
+        host.close();
+      }
+    });
+    const msgs = strings(viewerSent);
+    assert.ok(msgs.some((m) => m.type === 'chunk' && m.seq === 0), 'buffered chunk plays out');
+    assert.equal(msgs.filter((m) => m.type === 'end').length, 1, 'viewer gets end-of-stream');
+  });
+
+  it('tells post-end joiners the stream is over immediately', async () => {
+    const lateSent: unknown[] = [];
+    await capture(async () => {
+      const host = new StreamHost({ delayMs: 30, tickMs: 5, audioWaitMs: 10 });
+      try {
+        const pub = fakeSocket([]);
+        host.handleConnection(pub, 'publisher');
+        publishPair(pub, 0);
+        (pub as unknown as { emit: (e: string, ...a: unknown[]) => void }).emit(
+          'message',
+          JSON.stringify({ type: 'end-broadcast' }),
+          false,
+        );
+        await sleep(250);
+        host.handleConnection(fakeSocket(lateSent), 'viewer');
+        await sleep(50);
+      } finally {
+        host.close();
+      }
+    });
+    const msgs = strings(lateSent);
+    assert.deepEqual(
+      msgs.map((m) => m.type),
+      ['end'],
+      'late joiner gets only end-of-stream, no stale media',
+    );
+  });
+});
+
 describe('per-chunk lifecycle log', () => {
   it('logs received, moderated, and released seqs for every chunk', async () => {
     const lines = await capture(async () => {

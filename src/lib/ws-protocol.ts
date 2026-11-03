@@ -48,4 +48,25 @@ export interface LogBroadcast {
   entry: ModerationLogEntry;
 }
 
+/** Publisher -> server: broadcast over; drain the buffer, then end the stream. */
+export interface EndBroadcastMessage {
+  type: 'end-broadcast';
+}
+
+/** Server -> publisher: drain progress while ending (chunks still held). */
+export interface DrainProgressMessage {
+  type: 'drain';
+  pending: number;
+}
+
+/** Server -> publisher: drain complete, stream over. */
+export interface StreamEndedMessage {
+  type: 'ended';
+}
+
+/** Server -> viewer: the delayed stream has fully played out. */
+export interface EndOfStreamMessage {
+  type: 'end';
+}
+
 export type ServerMessage = ChunkMetaMessage | LogBroadcast;

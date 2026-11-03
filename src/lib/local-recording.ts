@@ -63,6 +63,11 @@ class LocalRecordingStore {
   push(seq: number, blob: Blob): void {
     if (this.chunks.some((c) => c.seq === seq)) return;
     this.chunks.push({ seq, blob });
+    // A cached full URL would miss this blob: drop it so full() rebuilds.
+    if (this.fullUrl) {
+      URL.revokeObjectURL(this.fullUrl);
+      this.fullUrl = null;
+    }
     this.emit();
   }
 

@@ -12,9 +12,13 @@ import type { ChunkDebug, Decision, ModerationLogEntry } from '../moderation/typ
 import type {
   ChunkMetaMessage,
   ClientRole,
+  DrainProgressMessage,
+  EndBroadcastMessage,
+  EndOfStreamMessage,
   LogBroadcast,
   MediaMetaMessage,
   RulesMessage,
+  StreamEndedMessage,
 } from '../lib/ws-protocol';
 
 export interface StreamHostOptions {
@@ -81,6 +85,11 @@ export class StreamHost {
   private readonly viewers = new Set<WebSocket>();
   private readonly startedViewers = new Set<WebSocket>();
   private publisher: WebSocket | null = null;
+  /** End requested: drain the buffer, then notify publisher + viewers. */
+  private ending = false;
+  private endAnnounced = false;
+  private readonly endedViewers = new Set<WebSocket>();
+  private lastDrainSent = -1;
   private readonly forceReleased = new Set<number>();
   /** Studio seqs whose moderation already started (labels late/orphaned wavs). */
   private readonly startedStudio = new Set<number>();
@@ -132,6 +141,11 @@ export class StreamHost {
       this.attachPublisher(ws);
       return;
     }
+    if (this.streamOver) {
+      // Joined after the end: nothing to serve, say so immediately.
+      this.sendJson(ws, { type: 'end' } satisfies EndOfStreamMessage);
+      return;
+    }
     this.viewers.add(ws);
     if (this.initSegment) {
       // Late joiner: headers now (stale media), live-delayed chunks after.
@@ -175,11 +189,34 @@ export class StreamHost {
       this.onPublisherText(data.toString());
     });
     ws.on('close', () => {
-      if (this.publisher === ws) this.publisher = null;
+      // Crash or tab close without end-broadcast: viewers still get the
+      // drain plus end-of-stream; only the publisher progress is lost.
+      if (this.publisher === ws) {
+        this.publisher = null;
+        this.requestEnd();
+      }
     });
   }
 
+  /** True once end was requested and every chunk has played out. */
+  private get streamOver(): boolean {
+    return this.ending && this.buffer.size === 0 && this.pendingModeration.size === 0;
+  }
+
+  private sendJson(ws: WebSocket, msg: object): void {
+    if (ws.readyState !== 1) return;
+    try {
+      ws.send(JSON.stringify(msg));
+    } catch {
+      // dropping a notification must never break the relay
+    }
+  }
+
   private resetStream(): void {
+    this.ending = false;
+    this.endAnnounced = false;
+    this.endedViewers.clear();
+    this.lastDrainSent = -1;
     this.buffer.clear();
     this.decisions.clear();
     this.chunkDebug.clear();
@@ -193,14 +230,25 @@ export class StreamHost {
     this.startedViewers.clear();
   }
 
+  /** End requested: keep serving viewers until the buffer fully plays out. */
+  private requestEnd(): void {
+    if (this.ending) return;
+    this.ending = true;
+    console.log('[end] broadcast end requested; draining delay buffer for viewers…');
+  }
+
   private onPublisherText(text: string): void {
-    let msg: RulesMessage | MediaMetaMessage | null = null;
+    let msg: RulesMessage | MediaMetaMessage | EndBroadcastMessage | null = null;
     try {
-      msg = JSON.parse(text) as RulesMessage | MediaMetaMessage;
+      msg = JSON.parse(text) as RulesMessage | MediaMetaMessage | EndBroadcastMessage;
     } catch {
       return;
     }
     if (!msg || typeof msg.type !== 'string') return;
+    if (msg.type === 'end-broadcast') {
+      this.requestEnd();
+      return;
+    }
     if (msg.type === 'rules') {
       // Legacy clients may still send free-text rules; they are ignored.
       // Moderation follows only the platform rulebook. No log entry: an
@@ -477,26 +525,57 @@ export class StreamHost {
     const nowMs = Date.now();
     this.forceReleaseOverdue(nowMs);
     const due = this.buffer.popDue(nowMs, (chunk) => !this.pendingModeration.has(chunk.seq));
-    if (due.length === 0) return;
-    for (const chunk of due) {
-      const decisions = this.decisions.get(chunk.seq) ?? [];
-      const debug = this.chunkDebug.get(chunk.seq);
-      for (const ws of [...this.viewers]) {
-        if (ws.readyState !== 1) {
-          this.viewers.delete(ws);
-          this.startedViewers.delete(ws);
-          continue;
+    if (due.length > 0) {
+      for (const chunk of due) {
+        const decisions = this.decisions.get(chunk.seq) ?? [];
+        const debug = this.chunkDebug.get(chunk.seq);
+        for (const ws of [...this.viewers]) {
+          if (ws.readyState !== 1) {
+            this.viewers.delete(ws);
+            this.startedViewers.delete(ws);
+            continue;
+          }
+          const init = !this.startedViewers.has(ws);
+          this.sendChunk(ws, { seq: chunk.seq, data: chunk.data, init, decisions, debug });
+          this.startedViewers.add(ws);
         }
-        const init = !this.startedViewers.has(ws);
-        this.sendChunk(ws, { seq: chunk.seq, data: chunk.data, init, decisions, debug });
-        this.startedViewers.add(ws);
+      }
+      const lags = due.map((c) => nowMs - c.receiptTimeMs);
+      console.log(
+        `[tx] released seqs=[${due.map((c) => c.seq).join(',')}] ` +
+          `receipt-to-release=${Math.min(...lags)}..${Math.max(...lags)}ms`,
+      );
+    }
+    this.pumpDrain();
+  }
+
+  /**
+   * While ending: report held chunks to the publisher (on change), and once
+   * the buffer has fully played out, mark the stream ended for everyone.
+   * Viewers are never cut: end-of-stream goes out only after their last byte.
+   */
+  private pumpDrain(): void {
+    if (!this.ending || this.endAnnounced) return;
+    // pendingModeration is always a subset of the buffer (chunks leave the
+    // buffer only after moderation settles), so buffer.size is the full drain.
+    const left = this.buffer.size;
+    if (left !== this.lastDrainSent) {
+      this.lastDrainSent = left;
+      if (this.publisher) {
+        this.sendJson(this.publisher, { type: 'drain', pending: left } satisfies DrainProgressMessage);
       }
     }
-    const lags = due.map((c) => nowMs - c.receiptTimeMs);
-    console.log(
-      `[tx] released seqs=[${due.map((c) => c.seq).join(',')}] ` +
-        `receipt-to-release=${Math.min(...lags)}..${Math.max(...lags)}ms`,
-    );
+    if (!this.streamOver) return;
+    this.endAnnounced = true;
+    if (this.publisher) {
+      this.sendJson(this.publisher, { type: 'ended' } satisfies StreamEndedMessage);
+    }
+    for (const ws of [...this.viewers]) {
+      if (this.endedViewers.has(ws)) continue;
+      this.endedViewers.add(ws);
+      this.sendJson(ws, { type: 'end' } satisfies EndOfStreamMessage);
+    }
+    console.log('[end] delayed stream fully played out; ended notifications sent.');
   }
 
   private sendChunk(

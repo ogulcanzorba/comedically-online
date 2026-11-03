@@ -82,7 +82,9 @@ npm run dev            # http://localhost:3000
 ## How streaming + moderation work (unchanged from Phase 1)
 
 2s WebM chunks + parallel 16kHz WAV over one WebSocket; server ring buffer releases
-chunk + decisions exactly 12s after server receipt. Mock mode scripts bleeps/blurs;
+chunk + decisions exactly 12s after server receipt. Ending is graceful: the server
+drains the buffer to viewers before end-of-stream, with drain progress to the
+studio. Mock mode scripts bleeps/blurs;
 live mode uses Voice Transcribe + SAM 3.1 (one 320px middle-frame image call per
 video rule, plus a 320px video confirm call on positive chunks only) + the Spark
 judge behind the spend cap. SAM video bills a 50-frame minimum per call, images

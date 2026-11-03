@@ -76,7 +76,17 @@ function useModerationFeed(showSlug: string): { events: FeedEvent[]; clear: () =
     ws.onmessage = (ev: MessageEvent) => {
       if (typeof ev.data === 'string') {
         try {
-          pending = JSON.parse(ev.data) as { seq: number; decisions: Decision[]; debug?: ChunkDebug };
+          const msg = JSON.parse(ev.data) as {
+            type?: string;
+            seq: number;
+            decisions: Decision[];
+            debug?: ChunkDebug;
+          };
+          // Chunk metas only; end-of-stream and future control frames are ignored.
+          pending =
+            msg.type === 'chunk' && typeof msg.seq === 'number' && Array.isArray(msg.decisions)
+              ? msg
+              : null;
         } catch {
           pending = null;
         }

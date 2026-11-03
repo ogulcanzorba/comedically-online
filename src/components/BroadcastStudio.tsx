@@ -88,7 +88,9 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
   const toastTimerRef = useRef<number | null>(null);
   const frameTimerRef = useRef<number | null>(null);
   const audioRef = useRef<{ ctx: AudioContext; chunks: Float32Array[] } | null>(null);
-  const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'ended'>('idle');
+  const finishTimerRef = useRef<number | null>(null);
+  const [status, setStatus] = useState<'idle' | 'preview' | 'live' | 'finishing' | 'ended'>('idle');
+  const [drainLeft, setDrainLeft] = useState<number | null>(null);
   const [error, setError] = useState('');
   const [needsAcceptance, setNeedsAcceptance] = useState(false);
   const [elapsed, setElapsed] = useState(0);
@@ -122,6 +124,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
       wsRef.current = null;
       if (toastTimerRef.current !== null) window.clearTimeout(toastTimerRef.current);
       if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
+      if (finishTimerRef.current !== null) window.clearTimeout(finishTimerRef.current);
     };
   }, []);
 
@@ -221,12 +224,34 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     frameTimerRef.current = window.setTimeout(() => captureFrame(seq), 1000);
   }
 
+  /** True finish: socket closed only after the server played out the drain. */
+  function finishBroadcast(): void {
+    if (finishTimerRef.current !== null) window.clearTimeout(finishTimerRef.current);
+    finishTimerRef.current = null;
+    wsRef.current?.close();
+    wsRef.current = null;
+    stopAudioCapture();
+    localRecording.end();
+    setToast(null);
+    setStatus('ended');
+    document.getElementById('recap')?.scrollIntoView({ behavior: 'smooth' });
+  }
+
   function handlePublisherMessage(ev: MessageEvent): void {
     if (typeof ev.data !== 'string') return;
     let msg: unknown;
     try {
       msg = JSON.parse(ev.data) as unknown;
     } catch {
+      return;
+    }
+    const typed = msg as { type?: string; pending?: number };
+    if (typed.type === 'drain' && typeof typed.pending === 'number') {
+      setDrainLeft(typed.pending);
+      return;
+    }
+    if (typed.type === 'ended') {
+      finishBroadcast();
       return;
     }
     const entry = (msg as { type?: string; entry?: ModerationLogEntry }).entry;
@@ -320,13 +345,24 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
     recorderRef.current = null;
     if (frameTimerRef.current !== null) window.clearTimeout(frameTimerRef.current);
     frameTimerRef.current = null;
-    wsRef.current?.close();
-    wsRef.current = null;
-    stopAudioCapture();
-    localRecording.end();
-    setToast(null);
-    setStatus('ended');
-    document.getElementById('recap')?.scrollIntoView({ behavior: 'smooth' });
+    // Keep the socket open: the server drains the delay buffer for viewers
+    // (still watching behind us) and tells us when moderation is complete.
+    const sock = wsRef.current;
+    if (!sock || sock.readyState !== WebSocket.OPEN) {
+      finishBroadcast();
+      return;
+    }
+    try {
+      sock.send(JSON.stringify({ type: 'end-broadcast' }));
+    } catch {
+      finishBroadcast();
+      return;
+    }
+    setDrainLeft(null);
+    setStatus('finishing');
+    // Failsafe: a dead server must not hang the studio on this screen.
+    if (finishTimerRef.current !== null) window.clearTimeout(finishTimerRef.current);
+    finishTimerRef.current = window.setTimeout(() => finishBroadcast(), 30_000);
   }
 
   const full = status === 'ended' ? localRecording.full() : null;
@@ -344,6 +380,13 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
               {formatElapsed(elapsed)}
             </span>
           </>
+        ) : status === 'finishing' ? (
+          <span
+            className="rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold text-amber-200"
+            aria-live="polite"
+          >
+            Finishing moderation… {drainLeft === null ? '…' : `${drainLeft} chunks left`}
+          </span>
         ) : status === 'ended' ? (
           <span className="rounded-full bg-neutral-800 px-3 py-1 text-xs text-neutral-400">
             broadcast ended — recap below
@@ -415,7 +458,7 @@ export function BroadcastStudio({ showId, accepted }: { showId: string; accepted
           >
             End broadcast
           </button>
-        ) : (
+        ) : status === 'finishing' ? null : (
           <button
             onClick={() => void goLive()}
             disabled={status !== 'preview' && status !== 'ended'}
